@@ -247,15 +247,14 @@ mod tests {
     fn test_job_options_retry() {
         let mut options = JobOptions::with_max_retries(3);
         assert!(options.can_retry());
-        
+
         options = options.increment_retry();
         assert!(options.can_retry());
-        
+
         options = options.increment_retry();
         assert!(options.can_retry());
-        
+
         options = options.increment_retry();
         assert!(!options.can_retry());
     }
 }
-

@@ -1,34 +1,38 @@
 //! Client for enqueueing jobs.
 
-use redis::aio::ConnectionManager;
-use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::config::ClientConfig;
+use crate::backend::{Backend, SharedBackend};
 use crate::error::{Result, WgError};
 use crate::job::{Job, JobId};
-use crate::redis_keys::RedisKeys;
 
 /// Client for enqueueing jobs to the queue.
 #[derive(Clone)]
-pub struct Client {
-    conn: ConnectionManager,
-    keys: RedisKeys,
+pub struct Client<B: Backend + Clone = SharedBackend> {
+    backend: B,
 }
 
-impl Client {
-    /// Create a new client with the given configuration.
-    pub async fn new(config: ClientConfig) -> Result<Self> {
-        let client = redis::Client::open(config.redis_url)?;
-        let conn = ConnectionManager::new(client).await?;
-        let keys = RedisKeys::new(config.namespace);
-        Ok(Self { conn, keys })
+impl Client<SharedBackend> {
+    /// Create a new client with a shared backend.
+    pub fn new(backend: impl Backend + 'static) -> Self {
+        Self {
+            backend: SharedBackend::new(backend),
+        }
     }
 
-    /// Create a new client with Redis URL and namespace.
+    /// Create a new client with Redis backend (convenience method).
+    #[cfg(feature = "redis")]
     pub async fn connect(redis_url: &str, namespace: &str) -> Result<Self> {
-        Self::new(ClientConfig::new(redis_url, namespace)).await
+        let backend = crate::backend::RedisBackend::new(redis_url, namespace).await?;
+        Ok(Self::new(backend))
+    }
+}
+
+impl<B: Backend + Clone> Client<B> {
+    /// Create a new client with a specific backend.
+    pub fn with_backend(backend: B) -> Self {
+        Self { backend }
     }
 
     /// Enqueue a job for immediate processing.
@@ -63,10 +67,9 @@ impl Client {
     {
         let job_id = job.id.clone();
         let json = job.to_json()?;
-        
-        let mut conn = self.conn.clone();
-        conn.lpush::<_, _, ()>(&self.keys.jobs(), &json).await?;
-        
+
+        self.backend.push_job(&json).await?;
+
         tracing::debug!(job_id = %job_id, "Job enqueued");
         Ok(job_id)
     }
@@ -116,40 +119,30 @@ impl Client {
             WgError::Config("Job must have scheduled_at set for scheduling".to_string())
         })?;
         let json = job.to_json()?;
-        
-        let mut conn = self.conn.clone();
-        conn.zadd::<_, _, _, ()>(&self.keys.schedule(), &json, run_at).await?;
-        
+
+        self.backend.schedule_job(&json, run_at).await?;
+
         tracing::debug!(job_id = %job_id, run_at = run_at, "Job scheduled");
         Ok(job_id)
     }
 
     /// Get the number of jobs in the immediate queue.
     pub async fn queue_len(&self) -> Result<usize> {
-        let mut conn = self.conn.clone();
-        let len: usize = conn.llen(self.keys.jobs()).await?;
-        Ok(len)
+        self.backend.queue_len().await
     }
 
     /// Get the number of jobs in the schedule queue.
     pub async fn schedule_len(&self) -> Result<usize> {
-        let mut conn = self.conn.clone();
-        let len: usize = conn.zcard(self.keys.schedule()).await?;
-        Ok(len)
+        self.backend.schedule_len().await
     }
 
     /// Get the number of jobs in the retry queue.
     pub async fn retry_len(&self) -> Result<usize> {
-        let mut conn = self.conn.clone();
-        let len: usize = conn.zcard(self.keys.retry()).await?;
-        Ok(len)
+        self.backend.retry_len().await
     }
 
     /// Get the number of jobs in the dead letter queue.
     pub async fn dead_len(&self) -> Result<usize> {
-        let mut conn = self.conn.clone();
-        let len: usize = conn.llen(self.keys.dead()).await?;
-        Ok(len)
+        self.backend.dead_len().await
     }
 }
-

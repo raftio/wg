@@ -36,4 +36,3 @@ pub enum WgError {
 
 /// Result type alias using WgError.
 pub type Result<T> = std::result::Result<T, WgError>;
-

@@ -1,10 +1,11 @@
-//! # wg - Redis Job Queue Library
+//! # wg - Multi-Backend Job Queue Library
 //!
-//! A Rust library for building job queues backed by Redis with support for
-//! scheduling, retries, and graceful shutdown.
+//! A Rust library for building job queues with support for multiple storage
+//! backends (Redis, PostgreSQL, MySQL, SQLite), scheduling, retries, and graceful shutdown.
 //!
 //! ## Features
 //!
+//! - **Multiple backends**: Redis, PostgreSQL, MySQL, SQLite
 //! - **Immediate job processing**: Enqueue jobs for immediate execution
 //! - **Scheduled jobs**: Schedule jobs to run at a future time
 //! - **Automatic retries**: Configurable retry logic with exponential backoff
@@ -17,7 +18,7 @@
 //! ### Client (Enqueuing Jobs)
 //!
 //! ```rust,no_run
-//! use wg::{Client, ClientConfig};
+//! use wg::Client;
 //! use serde::{Serialize, Deserialize};
 //! use std::time::Duration;
 //!
@@ -28,6 +29,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> wg::Result<()> {
+//!     // Using Redis backend
 //!     let client = Client::connect("redis://localhost", "myapp").await?;
 //!     
 //!     // Enqueue for immediate processing
@@ -58,32 +60,45 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> wg::Result<()> {
-//!     let pool = WorkerPool::builder()
+//!     let mut pool = WorkerPool::builder()
 //!         .redis_url("redis://localhost")
 //!         .namespace("myapp")
 //!         .workers(4)
 //!         .handler(process_job)
-//!         .build()?;
+//!         .build()
+//!         .await?;
 //!     
 //!     pool.run().await?;
 //!     Ok(())
 //! }
 //! ```
 
+pub mod backend;
 pub mod client;
 pub mod config;
 pub mod error;
 pub mod job;
-pub mod redis_keys;
 pub mod retrier;
 pub mod scheduler;
 pub mod worker;
 
 // Re-export main types
+pub use backend::{Backend, SharedBackend};
 pub use client::Client;
 pub use config::{ClientConfig, WorkerConfig, WorkerConfigBuilder};
 pub use error::{Result, WgError};
 pub use job::{Job, JobId, JobOptions, JobStatus};
-pub use redis_keys::RedisKeys;
 pub use worker::{JobError, JobResult, WorkerPool, WorkerPoolBuilder};
 
+// Re-export backend implementations
+#[cfg(feature = "redis")]
+pub use backend::RedisBackend;
+
+#[cfg(feature = "postgres")]
+pub use backend::PostgresBackend;
+
+#[cfg(feature = "mysql")]
+pub use backend::MySqlBackend;
+
+#[cfg(feature = "sqlite")]
+pub use backend::SqliteBackend;

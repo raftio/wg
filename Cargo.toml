@@ -3,11 +3,23 @@ name = "wg"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["redis"]
+redis = ["dep:redis"]
+postgres = ["dep:sqlx", "sqlx/postgres"]
+mysql = ["dep:sqlx", "sqlx/mysql"]
+sqlite = ["dep:sqlx", "sqlx/sqlite"]
+full = ["redis", "postgres", "mysql", "sqlite"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 tracing = "0.1"
+async-trait = "0.1"
+
+# Optional backends
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio"], optional = true }

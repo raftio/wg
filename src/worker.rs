@@ -1,7 +1,5 @@
 //! Worker pool for processing jobs.
 
-use redis::aio::ConnectionManager;
-use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::marker::PhantomData;
@@ -10,10 +8,10 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 
+use crate::backend::{Backend, SharedBackend};
 use crate::config::WorkerConfig;
 use crate::error::{Result, WgError};
 use crate::job::{Job, JobStatus};
-use crate::redis_keys::RedisKeys;
 use crate::retrier::Retrier;
 use crate::scheduler::Scheduler;
 
@@ -54,14 +52,16 @@ impl<E: std::error::Error> From<E> for JobError {
 }
 
 /// Worker pool for processing jobs.
-pub struct WorkerPool<T, F, Fut>
+pub struct WorkerPool<T, F, Fut, B = SharedBackend>
 where
     T: Serialize + for<'de> Deserialize<'de> + Send + Sync + Clone + 'static,
     F: Fn(T) -> Fut + Send + Sync + Clone + 'static,
     Fut: Future<Output = JobResult> + Send + 'static,
+    B: Backend + Clone + 'static,
 {
     config: WorkerConfig,
     handler: F,
+    backend: Option<B>,
     running: Arc<AtomicBool>,
     draining: Arc<AtomicBool>,
     in_progress: Arc<AtomicUsize>,
@@ -69,17 +69,31 @@ where
     _phantom: PhantomData<T>,
 }
 
-impl<T, F, Fut> WorkerPool<T, F, Fut>
+impl<T, F, Fut> WorkerPool<T, F, Fut, SharedBackend>
 where
     T: Serialize + for<'de> Deserialize<'de> + Send + Sync + Clone + 'static,
     F: Fn(T) -> Fut + Send + Sync + Clone + 'static,
     Fut: Future<Output = JobResult> + Send + 'static,
 {
-    /// Create a new worker pool with the given configuration and handler.
-    pub fn new(config: WorkerConfig, handler: F) -> Self {
+    /// Create a new builder for WorkerPool.
+    pub fn builder() -> WorkerPoolBuilder<T, F, Fut> {
+        WorkerPoolBuilder::new()
+    }
+}
+
+impl<T, F, Fut, B> WorkerPool<T, F, Fut, B>
+where
+    T: Serialize + for<'de> Deserialize<'de> + Send + Sync + Clone + 'static,
+    F: Fn(T) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = JobResult> + Send + 'static,
+    B: Backend + Clone + 'static,
+{
+    /// Create a new worker pool with the given configuration, handler, and backend.
+    pub fn new(config: WorkerConfig, handler: F, backend: B) -> Self {
         Self {
             config,
             handler,
+            backend: Some(backend),
             running: Arc::new(AtomicBool::new(false)),
             draining: Arc::new(AtomicBool::new(false)),
             in_progress: Arc::new(AtomicUsize::new(0)),
@@ -88,54 +102,43 @@ where
         }
     }
 
-    /// Create a new builder for WorkerPool.
-    pub fn builder() -> WorkerPoolBuilder<T, F, Fut> {
-        WorkerPoolBuilder::new()
-    }
-
     /// Run the worker pool.
     ///
     /// This will spawn worker tasks, scheduler, and retrier, and block until
     /// shutdown is requested and draining is complete.
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&mut self) -> Result<()> {
+        let backend = self
+            .backend
+            .take()
+            .ok_or_else(|| WgError::Config("Backend not configured".to_string()))?;
+
         self.running.store(true, Ordering::SeqCst);
-        
-        let client = redis::Client::open(self.config.redis_url.as_str())?;
-        let conn = ConnectionManager::new(client).await?;
-        let keys = RedisKeys::new(&self.config.namespace);
-        
+
         let mut tasks = JoinSet::new();
-        
+
         // Spawn scheduler
         let scheduler = Scheduler::new(
-            conn.clone(),
-            keys.clone(),
+            backend.clone(),
             self.config.scheduler_interval,
             self.config.batch_size,
             self.running.clone(),
         );
-        tasks.spawn(async move {
-            scheduler.run().await
-        });
-        
+        tasks.spawn(async move { scheduler.run().await });
+
         // Spawn retrier
         let retrier = Retrier::new(
-            conn.clone(),
-            keys.clone(),
+            backend.clone(),
             self.config.retrier_interval,
             self.config.batch_size,
             self.running.clone(),
         );
-        tasks.spawn(async move {
-            retrier.run().await
-        });
-        
+        tasks.spawn(async move { retrier.run().await });
+
         // Spawn workers
         for worker_id in 0..self.config.num_workers {
             let worker = Worker::new(
                 worker_id,
-                conn.clone(),
-                keys.clone(),
+                backend.clone(),
                 self.handler.clone(),
                 self.config.fetch_timeout,
                 self.running.clone(),
@@ -143,30 +146,28 @@ where
                 self.in_progress.clone(),
                 self.drain_notify.clone(),
             );
-            tasks.spawn(async move {
-                worker.run().await
-            });
+            tasks.spawn(async move { worker.run().await });
         }
-        
+
         tracing::info!(
             workers = self.config.num_workers,
             namespace = %self.config.namespace,
             "Worker pool started"
         );
-        
+
         // Wait for shutdown signal
         tokio::signal::ctrl_c().await.ok();
         tracing::info!("Shutdown signal received, draining...");
-        
+
         self.shutdown().await;
-        
+
         // Wait for all tasks to complete
         while let Some(result) = tasks.join_next().await {
             if let Err(e) = result {
                 tracing::error!(error = %e, "Task panicked");
             }
         }
-        
+
         tracing::info!("Worker pool stopped");
         Ok(())
     }
@@ -177,10 +178,10 @@ where
     pub async fn shutdown(&self) {
         // Enter draining mode - stop fetching new jobs
         self.draining.store(true, Ordering::SeqCst);
-        
+
         // Wait for in-progress jobs to complete
         let deadline = tokio::time::Instant::now() + self.config.shutdown_timeout;
-        
+
         while self.in_progress.load(Ordering::SeqCst) > 0 {
             if tokio::time::Instant::now() >= deadline {
                 tracing::warn!(
@@ -189,14 +190,14 @@ where
                 );
                 break;
             }
-            
+
             // Wait for notification or timeout
             tokio::select! {
                 _ = self.drain_notify.notified() => {}
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
             }
         }
-        
+
         // Stop all loops
         self.running.store(false, Ordering::SeqCst);
     }
@@ -221,6 +222,7 @@ where
 {
     config: WorkerConfig,
     handler: Option<F>,
+    backend: Option<SharedBackend>,
     _phantom: PhantomData<T>,
 }
 
@@ -235,11 +237,19 @@ where
         Self {
             config: WorkerConfig::default(),
             handler: None,
+            backend: None,
             _phantom: PhantomData,
         }
     }
 
-    /// Set the Redis URL.
+    /// Set the backend.
+    pub fn backend(mut self, backend: impl Backend + 'static) -> Self {
+        self.backend = Some(SharedBackend::new(backend));
+        self
+    }
+
+    /// Set the Redis URL (creates Redis backend).
+    #[cfg(feature = "redis")]
     pub fn redis_url(mut self, url: impl Into<String>) -> Self {
         self.config.redis_url = url.into();
         self
@@ -275,13 +285,36 @@ where
         self
     }
 
-    /// Build the WorkerPool.
-    pub fn build(self) -> Result<WorkerPool<T, F, Fut>> {
-        let handler = self.handler.ok_or_else(|| {
-            WgError::Config("Handler is required".to_string())
-        })?;
-        
-        Ok(WorkerPool::new(self.config, handler))
+    /// Build the WorkerPool with Redis backend.
+    #[cfg(feature = "redis")]
+    pub async fn build(self) -> Result<WorkerPool<T, F, Fut, SharedBackend>> {
+        let handler = self
+            .handler
+            .ok_or_else(|| WgError::Config("Handler is required".to_string()))?;
+
+        let backend = if let Some(b) = self.backend {
+            b
+        } else {
+            // Create Redis backend from config
+            let redis_backend =
+                crate::backend::RedisBackend::new(&self.config.redis_url, &self.config.namespace)
+                    .await?;
+            SharedBackend::new(redis_backend)
+        };
+
+        Ok(WorkerPool::new(self.config, handler, backend))
+    }
+
+    /// Build the WorkerPool with a custom backend (no Redis feature required).
+    pub fn build_with_backend<B: Backend + Clone + 'static>(
+        self,
+        backend: B,
+    ) -> Result<WorkerPool<T, F, Fut, B>> {
+        let handler = self
+            .handler
+            .ok_or_else(|| WgError::Config("Handler is required".to_string()))?;
+
+        Ok(WorkerPool::new(self.config, handler, backend))
     }
 }
 
@@ -297,15 +330,15 @@ where
 }
 
 /// Individual worker that processes jobs.
-struct Worker<T, F, Fut>
+struct Worker<T, F, Fut, B>
 where
     T: Serialize + for<'de> Deserialize<'de> + Send + Sync + Clone + 'static,
     F: Fn(T) -> Fut + Send + Sync + Clone + 'static,
     Fut: Future<Output = JobResult> + Send + 'static,
+    B: Backend + Clone + 'static,
 {
     id: usize,
-    conn: ConnectionManager,
-    keys: RedisKeys,
+    backend: B,
     handler: F,
     fetch_timeout: std::time::Duration,
     running: Arc<AtomicBool>,
@@ -315,17 +348,17 @@ where
     _phantom: PhantomData<T>,
 }
 
-impl<T, F, Fut> Worker<T, F, Fut>
+impl<T, F, Fut, B> Worker<T, F, Fut, B>
 where
     T: Serialize + for<'de> Deserialize<'de> + Send + Sync + Clone + 'static,
     F: Fn(T) -> Fut + Send + Sync + Clone + 'static,
     Fut: Future<Output = JobResult> + Send + 'static,
+    B: Backend + Clone + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     fn new(
         id: usize,
-        conn: ConnectionManager,
-        keys: RedisKeys,
+        backend: B,
         handler: F,
         fetch_timeout: std::time::Duration,
         running: Arc<AtomicBool>,
@@ -335,8 +368,7 @@ where
     ) -> Self {
         Self {
             id,
-            conn,
-            keys,
+            backend,
             handler,
             fetch_timeout,
             running,
@@ -349,14 +381,14 @@ where
 
     async fn run(&self) -> Result<()> {
         tracing::debug!(worker_id = self.id, "Worker started");
-        
+
         while self.running.load(Ordering::SeqCst) {
             // If draining, don't fetch new jobs
             if self.draining.load(Ordering::SeqCst) {
                 tracing::debug!(worker_id = self.id, "Worker draining, stopping fetch");
                 break;
             }
-            
+
             match self.fetch_and_process().await {
                 Ok(true) => {
                     // Job processed, continue
@@ -370,46 +402,40 @@ where
                 }
             }
         }
-        
+
         tracing::debug!(worker_id = self.id, "Worker stopped");
         Ok(())
     }
 
     async fn fetch_and_process(&self) -> Result<bool> {
-        let mut conn = self.conn.clone();
-        
-        // BRPOP with timeout
-        let result: Option<(String, String)> = conn
-            .brpop(self.keys.jobs(), self.fetch_timeout.as_secs() as f64)
-            .await?;
-        
-        let job_json = match result {
-            Some((_, json)) => json,
+        // Pop job with timeout
+        let job_json = match self.backend.pop_job(self.fetch_timeout).await? {
+            Some(json) => json,
             None => return Ok(false), // Timeout, no job available
         };
-        
+
         // Parse the job
         let mut job: Job<T> = match serde_json::from_str(&job_json) {
             Ok(job) => job,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to parse job, moving to dead queue");
-                conn.lpush::<_, _, ()>(&self.keys.dead(), &job_json).await?;
+                self.backend.push_dead(&job_json).await?;
                 return Ok(true);
             }
         };
-        
+
         // Track in-progress
         self.in_progress.fetch_add(1, Ordering::SeqCst);
-        
+
         tracing::debug!(
             worker_id = self.id,
             job_id = %job.id,
             "Processing job"
         );
-        
+
         // Process the job
         let result = (self.handler)(job.payload.clone()).await;
-        
+
         // Handle result
         match result {
             Ok(()) => {
@@ -422,18 +448,18 @@ where
             }
             Err(err) => {
                 job.last_error = Some(err.message.clone());
-                
+
                 if err.retryable && job.options.can_retry() {
                     // Retry the job
                     job.options = job.options.increment_retry();
                     job.status = JobStatus::Retry;
-                    
+
                     let retry_delay = job.options.next_retry_delay();
                     let retry_at = current_timestamp() + retry_delay.as_secs() as i64;
-                    
+
                     let job_json = job.to_json()?;
-                    conn.zadd::<_, _, _, ()>(&self.keys.retry(), &job_json, retry_at).await?;
-                    
+                    self.backend.retry_job(&job_json, retry_at).await?;
+
                     tracing::debug!(
                         worker_id = self.id,
                         job_id = %job.id,
@@ -445,8 +471,8 @@ where
                     // Move to dead queue
                     job.status = JobStatus::Dead;
                     let job_json = job.to_json()?;
-                    conn.lpush::<_, _, ()>(&self.keys.dead(), &job_json).await?;
-                    
+                    self.backend.push_dead(&job_json).await?;
+
                     tracing::warn!(
                         worker_id = self.id,
                         job_id = %job.id,
@@ -456,11 +482,11 @@ where
                 }
             }
         }
-        
+
         // Done processing
         self.in_progress.fetch_sub(1, Ordering::SeqCst);
         self.drain_notify.notify_one();
-        
+
         Ok(true)
     }
 }
@@ -472,4 +498,3 @@ fn current_timestamp() -> i64 {
         .unwrap()
         .as_secs() as i64
 }
-

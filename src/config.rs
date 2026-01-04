@@ -129,4 +129,3 @@ impl WorkerConfig {
         WorkerConfigBuilder::new()
     }
 }
-
