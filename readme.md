@@ -113,86 +113,11 @@ async fn main() -> wg_core::Result<()> {
 
 ## Backend Options
 
-### Redis (Recommended)
-
-Best for production use. Supports blocking pop (BRPOP) for efficient job fetching.
-
-```rust
-use wg_redis::RedisBackend;
-
-let backend = RedisBackend::new("redis://localhost:6379", "myapp").await?;
-```
-
-### PostgreSQL
-
-Great for when you want your job queue in the same database as your app.
-
-```rust
-use wg_postgres::PostgresBackend;
-
-let backend = PostgresBackend::new("postgres://user:pass@localhost/db", "myapp").await?;
-```
-
-### MySQL
-
-```rust
-use wg_mysql::MySqlBackend;
-
-let backend = MySqlBackend::new("mysql://user:pass@localhost/db", "myapp").await?;
-```
-
-### SQLite
-
-Perfect for development, testing, or embedded applications.
-
-```rust
-use wg_sqlite::SqliteBackend;
-
-// File-based
-let backend = SqliteBackend::new("sqlite:jobs.db", "myapp").await?;
-
-// In-memory (for testing)
-let backend = SqliteBackend::in_memory("myapp").await?;
-```
+See [docs/backend.md](docs/backend.md) for details.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                           CLIENT                                 │
-│  ┌─────────┐  ┌──────────┐                                      │
-│  │ enqueue │  │ schedule │                                      │
-│  └────┬────┘  └────┬─────┘                                      │
-│       │            │                                            │
-└───────┼────────────┼────────────────────────────────────────────┘
-        │            │
-        ▼            ▼
-┌───────────────────────────────────────────────────────────────────┐
-│                         BACKEND                                   │
-│  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐  ┌────────┐ │
-│  │  jobs queue  │  │   schedule   │  │    retry    │  │  dead  │ │
-│  │   (LIST)     │  │   (ZSET)     │  │   (ZSET)    │  │ (LIST) │ │
-│  └───────┬──────┘  └──────┬───────┘  └──────┬──────┘  └────────┘ │
-│          │                │                 │                     │
-└──────────┼────────────────┼─────────────────┼─────────────────────┘
-           │                │                 │
-           ▼                ▼                 ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                        WORKER POOL                                │
-│  ┌───────────────────────────────────────────────────────────┐   │
-│  │                      Scheduler                             │   │
-│  │   Moves due jobs from schedule queue to jobs queue         │   │
-│  └───────────────────────────────────────────────────────────┘   │
-│  ┌───────────────────────────────────────────────────────────┐   │
-│  │                       Retrier                              │   │
-│  │   Moves due jobs from retry queue to jobs queue            │   │
-│  └───────────────────────────────────────────────────────────┘   │
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐               │
-│  │ Worker  │ │ Worker  │ │ Worker  │ │ Worker  │  ...          │
-│  │   #1    │ │   #2    │ │   #3    │ │   #4    │               │
-│  └─────────┘ └─────────┘ └─────────┘ └─────────┘               │
-└──────────────────────────────────────────────────────────────────┘
-```
+See [docs/architecture.md](docs/architecture.md) for details.
 
 ## Job Options
 
