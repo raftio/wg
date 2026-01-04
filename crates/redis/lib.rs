@@ -207,6 +207,50 @@ impl Backend for RedisBackend {
         Ok(len)
     }
 
+    async fn list_dead(&self, limit: usize, offset: usize) -> Result<Vec<String>> {
+        let mut conn = self.conn.clone();
+        let jobs: Vec<String> = conn
+            .lrange(
+                self.keys.dead(),
+                offset as isize,
+                (offset + limit - 1) as isize,
+            )
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
+        Ok(jobs)
+    }
+
+    async fn get_dead_by_id(&self, job_id: &str) -> Result<Option<String>> {
+        let mut conn = self.conn.clone();
+        // Scan through the dead queue to find the job by ID
+        let jobs: Vec<String> = conn
+            .lrange(self.keys.dead(), 0, -1)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
+
+        for job_json in jobs {
+            if job_json.contains(job_id) {
+                // Verify it's the actual job ID by parsing
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&job_json) {
+                    if let Some(id) = parsed["id"]["0"].as_str() {
+                        if id == job_id {
+                            return Ok(Some(job_json));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn remove_dead(&self, job_json: &str) -> Result<()> {
+        let mut conn = self.conn.clone();
+        conn.lrem::<_, _, ()>(self.keys.dead(), 1, job_json)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
+        Ok(())
+    }
+
     async fn move_scheduled_to_queue(&self, job_json: &str) -> Result<()> {
         let mut conn = self.conn.clone();
         let schedule_key = self.keys.schedule();

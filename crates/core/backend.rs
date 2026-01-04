@@ -56,6 +56,15 @@ pub trait Backend: Send + Sync {
     /// Get the number of jobs in the dead letter queue.
     async fn dead_len(&self) -> Result<usize>;
 
+    /// List jobs in the dead letter queue with pagination.
+    async fn list_dead(&self, limit: usize, offset: usize) -> Result<Vec<String>>;
+
+    /// Get a dead job by its job ID.
+    async fn get_dead_by_id(&self, job_id: &str) -> Result<Option<String>>;
+
+    /// Remove a job from the dead letter queue.
+    async fn remove_dead(&self, job_json: &str) -> Result<()>;
+
     /// Move a job from scheduled to immediate queue atomically.
     async fn move_scheduled_to_queue(&self, job_json: &str) -> Result<()> {
         self.remove_scheduled(job_json).await?;
@@ -144,6 +153,18 @@ impl Backend for SharedBackend {
 
     async fn dead_len(&self) -> Result<usize> {
         self.inner.dead_len().await
+    }
+
+    async fn list_dead(&self, limit: usize, offset: usize) -> Result<Vec<String>> {
+        self.inner.list_dead(limit, offset).await
+    }
+
+    async fn get_dead_by_id(&self, job_id: &str) -> Result<Option<String>> {
+        self.inner.get_dead_by_id(job_id).await
+    }
+
+    async fn remove_dead(&self, job_json: &str) -> Result<()> {
+        self.inner.remove_dead(job_json).await
     }
 
     async fn move_scheduled_to_queue(&self, job_json: &str) -> Result<()> {

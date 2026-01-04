@@ -324,4 +324,45 @@ impl Backend for PostgresBackend {
             .map_err(|e| WgError::Backend(format!("Failed to get dead length: {}", e)))?;
         Ok(row.0 as usize)
     }
+
+    async fn list_dead(&self, limit: usize, offset: usize) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(&format!(
+            "SELECT job_json FROM {} ORDER BY id DESC LIMIT $1 OFFSET $2",
+            self.dead_table()
+        ))
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to list dead jobs: {}", e)))?;
+
+        Ok(rows.into_iter().map(|(json,)| json).collect())
+    }
+
+    async fn get_dead_by_id(&self, job_id: &str) -> Result<Option<String>> {
+        // Search for the job by ID in the JSON
+        let pattern = format!("%{}%", job_id);
+        let row: Option<(String,)> = sqlx::query_as(&format!(
+            "SELECT job_json FROM {} WHERE job_json LIKE $1 LIMIT 1",
+            self.dead_table()
+        ))
+        .bind(&pattern)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to get dead job: {}", e)))?;
+
+        Ok(row.map(|(json,)| json))
+    }
+
+    async fn remove_dead(&self, job_json: &str) -> Result<()> {
+        sqlx::query(&format!(
+            "DELETE FROM {} WHERE job_json = $1",
+            self.dead_table()
+        ))
+        .bind(job_json)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to remove dead job: {}", e)))?;
+        Ok(())
+    }
 }

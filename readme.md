@@ -1,6 +1,6 @@
-# wg - Background Jobs Queue
+# wg - Background Job Queue
 
-A Rust library for building job queues with support for multiple storage backends (Redis, PostgreSQL, MySQL, SQLite), scheduling, retries, and graceful shutdown.
+A Rust library for background job processing with multiple storage backends.
 
 ## Features
 
@@ -272,6 +272,17 @@ CREATE TABLE {namespace}_dead (
     job_json TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT NOW()
 );
+```
+
+## Examples
+
+```bash
+# Basic example with SQLite (no setup required)
+cargo run -p example-basic
+
+# Redis example (requires Redis)
+docker run -d -p 6379:6379 redis
+cargo run -p example-redis
 ```
 
 ## License
