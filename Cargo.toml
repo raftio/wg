@@ -9,6 +9,7 @@ members = [
     "crates/server",
     "examples/basic",
     "examples/redis",
+    "examples/server",
 ]
 
 [workspace.package]
@@ -26,6 +27,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+hostname = "0.4"
 
 # Backend-specific
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }

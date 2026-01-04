@@ -11,7 +11,9 @@ use tokio::task::JoinSet;
 use crate::backend::{Backend, SharedBackend};
 use crate::config::WorkerConfig;
 use crate::error::{Result, WgError};
+use crate::heartbeat::{generate_pool_id, Heartbeater};
 use crate::job::{Job, JobStatus};
+use crate::reaper::Reaper;
 use crate::retrier::Retrier;
 use crate::scheduler::Scheduler;
 
@@ -62,6 +64,7 @@ where
     config: WorkerConfig,
     handler: F,
     backend: Option<B>,
+    pool_id: String,
     running: Arc<AtomicBool>,
     draining: Arc<AtomicBool>,
     in_progress: Arc<AtomicUsize>,
@@ -90,10 +93,13 @@ where
 {
     /// Create a new worker pool with the given configuration, handler, and backend.
     pub fn new(config: WorkerConfig, handler: F, backend: B) -> Self {
+        let pool_id = config.pool_id.clone().unwrap_or_else(generate_pool_id);
+
         Self {
             config,
             handler,
             backend: Some(backend),
+            pool_id,
             running: Arc::new(AtomicBool::new(false)),
             draining: Arc::new(AtomicBool::new(false)),
             in_progress: Arc::new(AtomicUsize::new(0)),
@@ -102,10 +108,15 @@ where
         }
     }
 
+    /// Get the pool ID.
+    pub fn pool_id(&self) -> &str {
+        &self.pool_id
+    }
+
     /// Run the worker pool.
     ///
-    /// This will spawn worker tasks, scheduler, and retrier, and block until
-    /// shutdown is requested and draining is complete.
+    /// This will spawn worker tasks, scheduler, retrier, heartbeater, and reaper,
+    /// and block until shutdown is requested and draining is complete.
     pub async fn run(&mut self) -> Result<()> {
         let backend = self
             .backend
@@ -115,6 +126,28 @@ where
         self.running.store(true, Ordering::SeqCst);
 
         let mut tasks = JoinSet::new();
+
+        // Spawn heartbeater
+        let heartbeater = Heartbeater::new(
+            backend.clone(),
+            self.pool_id.clone(),
+            self.config.num_workers,
+            self.config.job_names.clone(),
+            self.config.heartbeat_interval,
+            self.running.clone(),
+        );
+        tasks.spawn(async move { heartbeater.run().await });
+
+        // Spawn reaper (if enabled)
+        if self.config.enable_reaper {
+            let reaper = Reaper::new(
+                backend.clone(),
+                self.config.reaper_interval,
+                self.config.stale_threshold,
+                self.running.clone(),
+            );
+            tasks.spawn(async move { reaper.run().await });
+        }
 
         // Spawn scheduler
         let scheduler = Scheduler::new(
@@ -138,6 +171,7 @@ where
         for worker_id in 0..self.config.num_workers {
             let worker = Worker::new(
                 worker_id,
+                self.pool_id.clone(),
                 backend.clone(),
                 self.handler.clone(),
                 self.config.fetch_timeout,
@@ -152,6 +186,7 @@ where
         tracing::info!(
             workers = self.config.num_workers,
             namespace = %self.config.namespace,
+            pool_id = %self.pool_id,
             "Worker pool started"
         );
 
@@ -168,7 +203,7 @@ where
             }
         }
 
-        tracing::info!("Worker pool stopped");
+        tracing::info!(pool_id = %self.pool_id, "Worker pool stopped");
         Ok(())
     }
 
@@ -324,6 +359,7 @@ where
     B: Backend + Clone + 'static,
 {
     id: usize,
+    pool_id: String,
     backend: B,
     handler: F,
     fetch_timeout: std::time::Duration,
@@ -344,6 +380,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn new(
         id: usize,
+        pool_id: String,
         backend: B,
         handler: F,
         fetch_timeout: std::time::Duration,
@@ -354,6 +391,7 @@ where
     ) -> Self {
         Self {
             id,
+            pool_id,
             backend,
             handler,
             fetch_timeout,
@@ -410,8 +448,15 @@ where
             }
         };
 
-        // Track in-progress
+        // Track in-progress (both locally and in backend for recovery)
         self.in_progress.fetch_add(1, Ordering::SeqCst);
+        if let Err(e) = self
+            .backend
+            .mark_in_progress(&self.pool_id, &job_json)
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to mark job in-progress in backend");
+        }
 
         tracing::debug!(
             worker_id = self.id,
@@ -443,8 +488,8 @@ where
                     let retry_delay = job.options.next_retry_delay();
                     let retry_at = current_timestamp() + retry_delay.as_secs() as i64;
 
-                    let job_json = job.to_json()?;
-                    self.backend.retry_job(&job_json, retry_at).await?;
+                    let updated_job_json = job.to_json()?;
+                    self.backend.retry_job(&updated_job_json, retry_at).await?;
 
                     tracing::debug!(
                         worker_id = self.id,
@@ -456,8 +501,8 @@ where
                 } else {
                     // Move to dead queue
                     job.status = JobStatus::Dead;
-                    let job_json = job.to_json()?;
-                    self.backend.push_dead(&job_json).await?;
+                    let updated_job_json = job.to_json()?;
+                    self.backend.push_dead(&updated_job_json).await?;
 
                     tracing::warn!(
                         worker_id = self.id,
@@ -469,7 +514,14 @@ where
             }
         }
 
-        // Done processing
+        // Done processing - remove from in-progress tracking
+        if let Err(e) = self
+            .backend
+            .complete_in_progress(&self.pool_id, &job_json)
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to complete job in-progress in backend");
+        }
         self.in_progress.fetch_sub(1, Ordering::SeqCst);
         self.drain_notify.notify_one();
 

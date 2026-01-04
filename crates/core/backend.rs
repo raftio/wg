@@ -4,10 +4,30 @@
 //! to work with different storage backends (Redis, PostgreSQL, MySQL, SQLite).
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::Result;
+
+/// Information about a worker pool for heartbeat monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerPoolInfo {
+    /// Unique identifier for this worker pool.
+    pub pool_id: String,
+    /// Last heartbeat timestamp (Unix epoch seconds).
+    pub heartbeat_at: i64,
+    /// When the worker pool started (Unix epoch seconds).
+    pub started_at: i64,
+    /// Number of concurrent workers.
+    pub concurrency: usize,
+    /// Hostname of the machine running this pool.
+    pub host: String,
+    /// Process ID.
+    pub pid: u32,
+    /// List of job type names this pool handles.
+    pub job_names: Vec<String>,
+}
 
 /// Backend trait for job queue storage operations.
 ///
@@ -76,6 +96,44 @@ pub trait Backend: Send + Sync {
         self.remove_retry(job_json).await?;
         self.push_job(job_json).await
     }
+
+    // ========== Heartbeat Operations ==========
+
+    /// Send a heartbeat for a worker pool.
+    ///
+    /// This registers/updates the worker pool's presence and status.
+    async fn heartbeat(&self, info: &WorkerPoolInfo) -> Result<()>;
+
+    /// Remove a worker pool's heartbeat (called on graceful shutdown).
+    async fn remove_heartbeat(&self, pool_id: &str) -> Result<()>;
+
+    /// List all registered worker pools.
+    async fn list_worker_pools(&self) -> Result<Vec<WorkerPoolInfo>>;
+
+    /// Get worker pools with stale heartbeats (heartbeat_at older than threshold).
+    ///
+    /// Returns the pool IDs of stale pools.
+    async fn get_stale_pools(&self, threshold_secs: u64) -> Result<Vec<String>>;
+
+    // ========== In-Progress Job Tracking ==========
+
+    /// Mark a job as in-progress for a specific worker pool.
+    ///
+    /// This is used for stale job recovery - if a worker dies, its in-progress
+    /// jobs can be recovered and re-enqueued.
+    async fn mark_in_progress(&self, pool_id: &str, job_json: &str) -> Result<()>;
+
+    /// Remove a job from the in-progress set (job completed or failed).
+    async fn complete_in_progress(&self, pool_id: &str, job_json: &str) -> Result<()>;
+
+    /// Get all in-progress jobs for a specific worker pool.
+    async fn get_in_progress_jobs(&self, pool_id: &str) -> Result<Vec<String>>;
+
+    /// Clean up a dead worker pool and return its in-progress jobs for recovery.
+    ///
+    /// This removes the heartbeat and returns all in-progress jobs so they
+    /// can be re-enqueued.
+    async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<String>>;
 }
 
 /// A type-erased backend that can be shared across threads.
@@ -173,5 +231,37 @@ impl Backend for SharedBackend {
 
     async fn move_retry_to_queue(&self, job_json: &str) -> Result<()> {
         self.inner.move_retry_to_queue(job_json).await
+    }
+
+    async fn heartbeat(&self, info: &WorkerPoolInfo) -> Result<()> {
+        self.inner.heartbeat(info).await
+    }
+
+    async fn remove_heartbeat(&self, pool_id: &str) -> Result<()> {
+        self.inner.remove_heartbeat(pool_id).await
+    }
+
+    async fn list_worker_pools(&self) -> Result<Vec<WorkerPoolInfo>> {
+        self.inner.list_worker_pools().await
+    }
+
+    async fn get_stale_pools(&self, threshold_secs: u64) -> Result<Vec<String>> {
+        self.inner.get_stale_pools(threshold_secs).await
+    }
+
+    async fn mark_in_progress(&self, pool_id: &str, job_json: &str) -> Result<()> {
+        self.inner.mark_in_progress(pool_id, job_json).await
+    }
+
+    async fn complete_in_progress(&self, pool_id: &str, job_json: &str) -> Result<()> {
+        self.inner.complete_in_progress(pool_id, job_json).await
+    }
+
+    async fn get_in_progress_jobs(&self, pool_id: &str) -> Result<Vec<String>> {
+        self.inner.get_in_progress_jobs(pool_id).await
+    }
+
+    async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<String>> {
+        self.inner.cleanup_pool(pool_id).await
     }
 }

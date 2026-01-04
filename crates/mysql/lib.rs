@@ -19,7 +19,7 @@
 use async_trait::async_trait;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use std::time::Duration;
-use wg_core::{Backend, Result, WgError};
+use wg_core::{Backend, Result, WgError, WorkerPoolInfo};
 
 /// MySQL backend for job queue storage.
 #[derive(Clone)]
@@ -119,6 +119,47 @@ impl MySqlBackend {
         .await
         .map_err(|e| WgError::Backend(format!("Failed to create dead table: {}", e)))?;
 
+        // Create worker pools table for heartbeat monitoring
+        let worker_pools_table = format!("{}_worker_pools", self.namespace);
+        sqlx::query(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {} (
+                pool_id VARCHAR(255) PRIMARY KEY,
+                heartbeat_at BIGINT NOT NULL,
+                started_at BIGINT NOT NULL,
+                concurrency INT NOT NULL,
+                host VARCHAR(255) NOT NULL,
+                pid INT NOT NULL,
+                job_names TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_heartbeat_at (heartbeat_at)
+            )
+            "#,
+            worker_pools_table
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to create worker_pools table: {}", e)))?;
+
+        // Create in_progress table for tracking jobs being processed
+        let in_progress_table = format!("{}_in_progress", self.namespace);
+        sqlx::query(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {} (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                pool_id VARCHAR(255) NOT NULL,
+                job_json TEXT NOT NULL,
+                started_at BIGINT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_pool_id (pool_id)
+            )
+            "#,
+            in_progress_table
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to create in_progress table: {}", e)))?;
+
         Ok(())
     }
 
@@ -136,6 +177,14 @@ impl MySqlBackend {
 
     fn dead_table(&self) -> String {
         format!("{}_dead", self.namespace)
+    }
+
+    fn worker_pools_table(&self) -> String {
+        format!("{}_worker_pools", self.namespace)
+    }
+
+    fn in_progress_table(&self) -> String {
+        format!("{}_in_progress", self.namespace)
     }
 }
 
@@ -365,5 +414,166 @@ impl Backend for MySqlBackend {
         .await
         .map_err(|e| WgError::Backend(format!("Failed to remove dead job: {}", e)))?;
         Ok(())
+    }
+
+    // ========== Heartbeat Operations ==========
+
+    async fn heartbeat(&self, info: &WorkerPoolInfo) -> Result<()> {
+        let job_names_json =
+            serde_json::to_string(&info.job_names).unwrap_or_else(|_| "[]".to_string());
+
+        sqlx::query(&format!(
+            r#"
+            INSERT INTO {} (pool_id, heartbeat_at, started_at, concurrency, host, pid, job_names)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                heartbeat_at = VALUES(heartbeat_at),
+                concurrency = VALUES(concurrency),
+                host = VALUES(host),
+                pid = VALUES(pid),
+                job_names = VALUES(job_names)
+            "#,
+            self.worker_pools_table()
+        ))
+        .bind(&info.pool_id)
+        .bind(info.heartbeat_at)
+        .bind(info.started_at)
+        .bind(info.concurrency as i32)
+        .bind(&info.host)
+        .bind(info.pid as i32)
+        .bind(&job_names_json)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to send heartbeat: {}", e)))?;
+        Ok(())
+    }
+
+    async fn remove_heartbeat(&self, pool_id: &str) -> Result<()> {
+        // Remove from worker_pools table
+        sqlx::query(&format!(
+            "DELETE FROM {} WHERE pool_id = ?",
+            self.worker_pools_table()
+        ))
+        .bind(pool_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to remove heartbeat: {}", e)))?;
+
+        // Also clean up in_progress jobs
+        sqlx::query(&format!(
+            "DELETE FROM {} WHERE pool_id = ?",
+            self.in_progress_table()
+        ))
+        .bind(pool_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to clean up in_progress: {}", e)))?;
+
+        Ok(())
+    }
+
+    async fn list_worker_pools(&self) -> Result<Vec<WorkerPoolInfo>> {
+        let rows: Vec<(String, i64, i64, i32, String, i32, String)> = sqlx::query_as(&format!(
+            "SELECT pool_id, heartbeat_at, started_at, concurrency, host, pid, job_names FROM {}",
+            self.worker_pools_table()
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to list worker pools: {}", e)))?;
+
+        let pools = rows
+            .into_iter()
+            .map(
+                |(pool_id, heartbeat_at, started_at, concurrency, host, pid, job_names)| {
+                    WorkerPoolInfo {
+                        pool_id,
+                        heartbeat_at,
+                        started_at,
+                        concurrency: concurrency as usize,
+                        host,
+                        pid: pid as u32,
+                        job_names: serde_json::from_str(&job_names).unwrap_or_default(),
+                    }
+                },
+            )
+            .collect();
+
+        Ok(pools)
+    }
+
+    async fn get_stale_pools(&self, threshold_secs: u64) -> Result<Vec<String>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let stale_threshold = now - threshold_secs as i64;
+
+        let rows: Vec<(String,)> = sqlx::query_as(&format!(
+            "SELECT pool_id FROM {} WHERE heartbeat_at < ?",
+            self.worker_pools_table()
+        ))
+        .bind(stale_threshold)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to get stale pools: {}", e)))?;
+
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    // ========== In-Progress Job Tracking ==========
+
+    async fn mark_in_progress(&self, pool_id: &str, job_json: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        sqlx::query(&format!(
+            "INSERT INTO {} (pool_id, job_json, started_at) VALUES (?, ?, ?)",
+            self.in_progress_table()
+        ))
+        .bind(pool_id)
+        .bind(job_json)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to mark in_progress: {}", e)))?;
+        Ok(())
+    }
+
+    async fn complete_in_progress(&self, pool_id: &str, job_json: &str) -> Result<()> {
+        sqlx::query(&format!(
+            "DELETE FROM {} WHERE pool_id = ? AND job_json = ? LIMIT 1",
+            self.in_progress_table()
+        ))
+        .bind(pool_id)
+        .bind(job_json)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to complete in_progress: {}", e)))?;
+        Ok(())
+    }
+
+    async fn get_in_progress_jobs(&self, pool_id: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(&format!(
+            "SELECT job_json FROM {} WHERE pool_id = ?",
+            self.in_progress_table()
+        ))
+        .bind(pool_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to get in_progress jobs: {}", e)))?;
+
+        Ok(rows.into_iter().map(|(json,)| json).collect())
+    }
+
+    async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<String>> {
+        // First get all in-progress jobs
+        let jobs = self.get_in_progress_jobs(pool_id).await?;
+
+        // Then remove the heartbeat (which also cleans up in_progress)
+        self.remove_heartbeat(pool_id).await?;
+
+        Ok(jobs)
     }
 }

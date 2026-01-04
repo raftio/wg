@@ -59,6 +59,7 @@ where
             retrier_interval: self.config.retrier_interval,
             batch_size: self.config.batch_size,
             shutdown_timeout: self.config.shutdown_timeout,
+            ..Default::default()
         };
 
         // Create worker pool
