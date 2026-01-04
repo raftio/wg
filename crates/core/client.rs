@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::backend::{Backend, SharedBackend};
 use crate::error::{Result, WgError};
-use crate::job::{Job, JobId};
+use crate::job::{Job, JobId, JobOptions};
 
 /// Client for enqueueing jobs to the queue.
 #[derive(Clone)]
@@ -19,13 +19,6 @@ impl Client<SharedBackend> {
         Self {
             backend: SharedBackend::new(backend),
         }
-    }
-
-    /// Create a new client with Redis backend (convenience method).
-    #[cfg(feature = "redis")]
-    pub async fn connect(redis_url: &str, namespace: &str) -> Result<Self> {
-        let backend = crate::backend::RedisBackend::new(redis_url, namespace).await?;
-        Ok(Self::new(backend))
     }
 }
 
@@ -48,11 +41,7 @@ impl<B: Backend + Clone> Client<B> {
     }
 
     /// Enqueue a job with custom options.
-    pub async fn enqueue_with_options<T>(
-        &self,
-        payload: T,
-        options: crate::job::JobOptions,
-    ) -> Result<JobId>
+    pub async fn enqueue_with_options<T>(&self, payload: T, options: JobOptions) -> Result<JobId>
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
@@ -91,7 +80,7 @@ impl<B: Backend + Clone> Client<B> {
         &self,
         payload: T,
         delay: Duration,
-        options: crate::job::JobOptions,
+        options: JobOptions,
     ) -> Result<JobId>
     where
         T: Serialize + for<'de> Deserialize<'de>,

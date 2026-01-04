@@ -1,0 +1,16 @@
+[package]
+name = "wg-redis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Redis backend for wg job queue"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+wg-core = { workspace = true }
+redis = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+

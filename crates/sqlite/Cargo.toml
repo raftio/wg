@@ -1,0 +1,17 @@
+[package]
+name = "wg-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite backend for wg job queue"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+wg-core = { workspace = true }
+sqlx = { workspace = true, features = ["sqlite"] }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+

@@ -248,13 +248,6 @@ where
         self
     }
 
-    /// Set the Redis URL (creates Redis backend).
-    #[cfg(feature = "redis")]
-    pub fn redis_url(mut self, url: impl Into<String>) -> Self {
-        self.config.redis_url = url.into();
-        self
-    }
-
     /// Set the namespace.
     pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
         self.config.namespace = namespace.into();
@@ -285,27 +278,20 @@ where
         self
     }
 
-    /// Build the WorkerPool with Redis backend.
-    #[cfg(feature = "redis")]
-    pub async fn build(self) -> Result<WorkerPool<T, F, Fut, SharedBackend>> {
+    /// Build the WorkerPool with the configured backend.
+    pub fn build(self) -> Result<WorkerPool<T, F, Fut, SharedBackend>> {
         let handler = self
             .handler
             .ok_or_else(|| WgError::Config("Handler is required".to_string()))?;
 
-        let backend = if let Some(b) = self.backend {
-            b
-        } else {
-            // Create Redis backend from config
-            let redis_backend =
-                crate::backend::RedisBackend::new(&self.config.redis_url, &self.config.namespace)
-                    .await?;
-            SharedBackend::new(redis_backend)
-        };
+        let backend = self
+            .backend
+            .ok_or_else(|| WgError::Config("Backend is required".to_string()))?;
 
         Ok(WorkerPool::new(self.config, handler, backend))
     }
 
-    /// Build the WorkerPool with a custom backend (no Redis feature required).
+    /// Build the WorkerPool with a custom backend.
     pub fn build_with_backend<B: Backend + Clone + 'static>(
         self,
         backend: B,

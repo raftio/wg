@@ -5,10 +5,6 @@ use thiserror::Error;
 /// The main error type for the wg library.
 #[derive(Error, Debug)]
 pub enum WgError {
-    /// Redis connection or operation error.
-    #[error("Redis error: {0}")]
-    Redis(#[from] redis::RedisError),
-
     /// JSON serialization/deserialization error.
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -32,6 +28,10 @@ pub enum WgError {
     /// Timeout error.
     #[error("Timeout: {0}")]
     Timeout(String),
+
+    /// Backend-specific error.
+    #[error("Backend error: {0}")]
+    Backend(String),
 }
 
 /// Result type alias using WgError.

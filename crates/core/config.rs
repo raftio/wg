@@ -5,17 +5,17 @@ use std::time::Duration;
 /// Configuration for the Client (enqueuer).
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// Redis connection URL.
-    pub redis_url: String,
-    /// Namespace prefix for Redis keys.
+    /// Backend connection URL.
+    pub url: String,
+    /// Namespace prefix for keys/tables.
     pub namespace: String,
 }
 
 impl ClientConfig {
     /// Create a new ClientConfig.
-    pub fn new(redis_url: impl Into<String>, namespace: impl Into<String>) -> Self {
+    pub fn new(url: impl Into<String>, namespace: impl Into<String>) -> Self {
         Self {
-            redis_url: redis_url.into(),
+            url: url.into(),
             namespace: namespace.into(),
         }
     }
@@ -24,13 +24,13 @@ impl ClientConfig {
 /// Configuration for the WorkerPool.
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
-    /// Redis connection URL.
-    pub redis_url: String,
-    /// Namespace prefix for Redis keys.
+    /// Backend connection URL.
+    pub url: String,
+    /// Namespace prefix for keys/tables.
     pub namespace: String,
     /// Number of worker tasks to spawn.
     pub num_workers: usize,
-    /// Timeout for BRPOP operations.
+    /// Timeout for pop operations.
     pub fetch_timeout: Duration,
     /// Interval for the scheduler loop.
     pub scheduler_interval: Duration,
@@ -45,7 +45,7 @@ pub struct WorkerConfig {
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
-            redis_url: "redis://127.0.0.1:6379".to_string(),
+            url: String::new(),
             namespace: "wg".to_string(),
             num_workers: 4,
             fetch_timeout: Duration::from_secs(5),
@@ -69,9 +69,9 @@ impl WorkerConfigBuilder {
         Self::default()
     }
 
-    /// Set the Redis URL.
-    pub fn redis_url(mut self, url: impl Into<String>) -> Self {
-        self.config.redis_url = url.into();
+    /// Set the backend URL.
+    pub fn url(mut self, url: impl Into<String>) -> Self {
+        self.config.url = url.into();
         self
     }
 
@@ -87,7 +87,7 @@ impl WorkerConfigBuilder {
         self
     }
 
-    /// Set the fetch timeout for BRPOP.
+    /// Set the fetch timeout.
     pub fn fetch_timeout(mut self, timeout: Duration) -> Self {
         self.config.fetch_timeout = timeout;
         self

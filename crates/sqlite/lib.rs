@@ -1,27 +1,43 @@
-//! PostgreSQL backend implementation using SQLx.
+//! SQLite backend for wg job queue.
+//!
+//! This crate provides a SQLite-based storage backend for the wg job queue.
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! use wg_sqlite::SqliteBackend;
+//! use wg_core::Client;
+//!
+//! #[tokio::main]
+//! async fn main() -> wg_core::Result<()> {
+//!     let backend = SqliteBackend::new("sqlite:jobs.db", "myapp").await?;
+//!     let client = Client::new(backend);
+//!     Ok(())
+//! }
+//! ```
 
 use async_trait::async_trait;
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::time::Duration;
+use wg_core::{Backend, Result, WgError};
 
-use crate::backend::Backend;
-use crate::error::{Result, WgError};
-
-/// PostgreSQL backend for job queue storage.
+/// SQLite backend for job queue storage.
 #[derive(Clone)]
-pub struct PostgresBackend {
-    pool: PgPool,
+pub struct SqliteBackend {
+    pool: SqlitePool,
     namespace: String,
 }
 
-impl PostgresBackend {
-    /// Create a new PostgreSQL backend.
+impl SqliteBackend {
+    /// Create a new SQLite backend.
+    ///
+    /// The database_url should be in the format: `sqlite:path/to/db.sqlite` or `sqlite::memory:`
     pub async fn new(database_url: &str, namespace: &str) -> Result<Self> {
-        let pool = PgPoolOptions::new()
-            .max_connections(10)
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1) // SQLite works best with single connection for writes
             .connect(database_url)
             .await
-            .map_err(|e| WgError::Config(format!("Failed to connect to PostgreSQL: {}", e)))?;
+            .map_err(|e| WgError::Backend(format!("Failed to connect to SQLite: {}", e)))?;
 
         let backend = Self {
             pool,
@@ -32,6 +48,11 @@ impl PostgresBackend {
         backend.init_tables().await?;
 
         Ok(backend)
+    }
+
+    /// Create an in-memory SQLite backend (useful for testing).
+    pub async fn in_memory(namespace: &str) -> Result<Self> {
+        Self::new("sqlite::memory:", namespace).await
     }
 
     /// Initialize the required tables.
@@ -45,32 +66,32 @@ impl PostgresBackend {
         sqlx::query(&format!(
             r#"
             CREATE TABLE IF NOT EXISTS {} (
-                id BIGSERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_json TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                created_at TEXT DEFAULT (datetime('now'))
             )
             "#,
             jobs_table
         ))
         .execute(&self.pool)
         .await
-        .map_err(|e| WgError::Config(format!("Failed to create jobs table: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to create jobs table: {}", e)))?;
 
         // Create scheduled table
         sqlx::query(&format!(
             r#"
             CREATE TABLE IF NOT EXISTS {} (
-                id BIGSERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_json TEXT NOT NULL,
-                run_at BIGINT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                run_at INTEGER NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
             )
             "#,
             scheduled_table
         ))
         .execute(&self.pool)
         .await
-        .map_err(|e| WgError::Config(format!("Failed to create scheduled table: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to create scheduled table: {}", e)))?;
 
         // Create index on run_at
         sqlx::query(&format!(
@@ -79,23 +100,23 @@ impl PostgresBackend {
         ))
         .execute(&self.pool)
         .await
-        .ok(); // Ignore if already exists
+        .ok();
 
         // Create retry table
         sqlx::query(&format!(
             r#"
             CREATE TABLE IF NOT EXISTS {} (
-                id BIGSERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_json TEXT NOT NULL,
-                retry_at BIGINT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                retry_at INTEGER NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
             )
             "#,
             retry_table
         ))
         .execute(&self.pool)
         .await
-        .map_err(|e| WgError::Config(format!("Failed to create retry table: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to create retry table: {}", e)))?;
 
         // Create index on retry_at
         sqlx::query(&format!(
@@ -110,16 +131,16 @@ impl PostgresBackend {
         sqlx::query(&format!(
             r#"
             CREATE TABLE IF NOT EXISTS {} (
-                id BIGSERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_json TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                created_at TEXT DEFAULT (datetime('now'))
             )
             "#,
             dead_table
         ))
         .execute(&self.pool)
         .await
-        .map_err(|e| WgError::Config(format!("Failed to create dead table: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to create dead table: {}", e)))?;
 
         Ok(())
     }
@@ -142,16 +163,16 @@ impl PostgresBackend {
 }
 
 #[async_trait]
-impl Backend for PostgresBackend {
+impl Backend for SqliteBackend {
     async fn push_job(&self, job_json: &str) -> Result<()> {
         sqlx::query(&format!(
-            "INSERT INTO {} (job_json) VALUES ($1)",
+            "INSERT INTO {} (job_json) VALUES (?)",
             self.jobs_table()
         ))
         .bind(job_json)
         .execute(&self.pool)
         .await
-        .map_err(|e| WgError::JobProcessing(format!("Failed to push job: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to push job: {}", e)))?;
         Ok(())
     }
 
@@ -160,21 +181,23 @@ impl Backend for PostgresBackend {
         let poll_interval = Duration::from_millis(100);
 
         loop {
-            // Try to pop a job using DELETE ... RETURNING
-            let result: Option<(String,)> = sqlx::query_as(&format!(
-                r#"
-                DELETE FROM {} WHERE id = (
-                    SELECT id FROM {} ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED
-                ) RETURNING job_json
-                "#,
-                self.jobs_table(),
+            // SQLite: use a transaction to atomically select and delete
+            let result: Option<(i64, String)> = sqlx::query_as(&format!(
+                "SELECT id, job_json FROM {} ORDER BY id LIMIT 1",
                 self.jobs_table()
             ))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| WgError::JobProcessing(format!("Failed to pop job: {}", e)))?;
+            .map_err(|e| WgError::Backend(format!("Failed to select job: {}", e)))?;
 
-            if let Some((job_json,)) = result {
+            if let Some((id, job_json)) = result {
+                // Delete the job
+                sqlx::query(&format!("DELETE FROM {} WHERE id = ?", self.jobs_table()))
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|e| WgError::Backend(format!("Failed to delete job: {}", e)))?;
+
                 return Ok(Some(job_json));
             }
 
@@ -190,91 +213,91 @@ impl Backend for PostgresBackend {
 
     async fn schedule_job(&self, job_json: &str, run_at: i64) -> Result<()> {
         sqlx::query(&format!(
-            "INSERT INTO {} (job_json, run_at) VALUES ($1, $2)",
+            "INSERT INTO {} (job_json, run_at) VALUES (?, ?)",
             self.scheduled_table()
         ))
         .bind(job_json)
         .bind(run_at)
         .execute(&self.pool)
         .await
-        .map_err(|e| WgError::JobProcessing(format!("Failed to schedule job: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to schedule job: {}", e)))?;
         Ok(())
     }
 
     async fn get_due_scheduled(&self, now: i64, limit: usize) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(&format!(
-            "SELECT job_json FROM {} WHERE run_at <= $1 ORDER BY run_at LIMIT $2",
+            "SELECT job_json FROM {} WHERE run_at <= ? ORDER BY run_at LIMIT ?",
             self.scheduled_table()
         ))
         .bind(now)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| WgError::JobProcessing(format!("Failed to get scheduled jobs: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to get scheduled jobs: {}", e)))?;
 
         Ok(rows.into_iter().map(|(json,)| json).collect())
     }
 
     async fn remove_scheduled(&self, job_json: &str) -> Result<()> {
         sqlx::query(&format!(
-            "DELETE FROM {} WHERE job_json = $1",
+            "DELETE FROM {} WHERE job_json = ?",
             self.scheduled_table()
         ))
         .bind(job_json)
         .execute(&self.pool)
         .await
-        .map_err(|e| WgError::JobProcessing(format!("Failed to remove scheduled job: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to remove scheduled job: {}", e)))?;
         Ok(())
     }
 
     async fn retry_job(&self, job_json: &str, retry_at: i64) -> Result<()> {
         sqlx::query(&format!(
-            "INSERT INTO {} (job_json, retry_at) VALUES ($1, $2)",
+            "INSERT INTO {} (job_json, retry_at) VALUES (?, ?)",
             self.retry_table()
         ))
         .bind(job_json)
         .bind(retry_at)
         .execute(&self.pool)
         .await
-        .map_err(|e| WgError::JobProcessing(format!("Failed to retry job: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to retry job: {}", e)))?;
         Ok(())
     }
 
     async fn get_due_retries(&self, now: i64, limit: usize) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(&format!(
-            "SELECT job_json FROM {} WHERE retry_at <= $1 ORDER BY retry_at LIMIT $2",
+            "SELECT job_json FROM {} WHERE retry_at <= ? ORDER BY retry_at LIMIT ?",
             self.retry_table()
         ))
         .bind(now)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| WgError::JobProcessing(format!("Failed to get retry jobs: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to get retry jobs: {}", e)))?;
 
         Ok(rows.into_iter().map(|(json,)| json).collect())
     }
 
     async fn remove_retry(&self, job_json: &str) -> Result<()> {
         sqlx::query(&format!(
-            "DELETE FROM {} WHERE job_json = $1",
+            "DELETE FROM {} WHERE job_json = ?",
             self.retry_table()
         ))
         .bind(job_json)
         .execute(&self.pool)
         .await
-        .map_err(|e| WgError::JobProcessing(format!("Failed to remove retry job: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to remove retry job: {}", e)))?;
         Ok(())
     }
 
     async fn push_dead(&self, job_json: &str) -> Result<()> {
         sqlx::query(&format!(
-            "INSERT INTO {} (job_json) VALUES ($1)",
+            "INSERT INTO {} (job_json) VALUES (?)",
             self.dead_table()
         ))
         .bind(job_json)
         .execute(&self.pool)
         .await
-        .map_err(|e| WgError::JobProcessing(format!("Failed to push dead job: {}", e)))?;
+        .map_err(|e| WgError::Backend(format!("Failed to push dead job: {}", e)))?;
         Ok(())
     }
 
@@ -282,7 +305,7 @@ impl Backend for PostgresBackend {
         let row: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", self.jobs_table()))
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| WgError::JobProcessing(format!("Failed to get queue length: {}", e)))?;
+            .map_err(|e| WgError::Backend(format!("Failed to get queue length: {}", e)))?;
         Ok(row.0 as usize)
     }
 
@@ -291,9 +314,7 @@ impl Backend for PostgresBackend {
             sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", self.scheduled_table()))
                 .fetch_one(&self.pool)
                 .await
-                .map_err(|e| {
-                    WgError::JobProcessing(format!("Failed to get schedule length: {}", e))
-                })?;
+                .map_err(|e| WgError::Backend(format!("Failed to get schedule length: {}", e)))?;
         Ok(row.0 as usize)
     }
 
@@ -301,7 +322,7 @@ impl Backend for PostgresBackend {
         let row: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", self.retry_table()))
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| WgError::JobProcessing(format!("Failed to get retry length: {}", e)))?;
+            .map_err(|e| WgError::Backend(format!("Failed to get retry length: {}", e)))?;
         Ok(row.0 as usize)
     }
 
@@ -309,7 +330,7 @@ impl Backend for PostgresBackend {
         let row: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", self.dead_table()))
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| WgError::JobProcessing(format!("Failed to get dead length: {}", e)))?;
+            .map_err(|e| WgError::Backend(format!("Failed to get dead length: {}", e)))?;
         Ok(row.0 as usize)
     }
 }

@@ -1,98 +1,61 @@
-# wg - Multi-Backend Job Queue Library
+# wg - Background Jobs Queue
 
 A Rust library for building job queues with support for multiple storage backends (Redis, PostgreSQL, MySQL, SQLite), scheduling, retries, and graceful shutdown.
 
 ## Features
 
-- **Multiple backends** - Redis, PostgreSQL, MySQL, SQLite
-- **Immediate job processing** - Enqueue jobs for immediate execution
-- **Scheduled jobs** - Schedule jobs to run at a future time
-- **Automatic retries** - Configurable retry logic with exponential backoff
-- **Dead letter queue** - Failed jobs are moved to a dead queue for inspection
-- **Graceful shutdown** - Complete in-progress jobs before stopping (draining)
-- **Multiple workers** - Process jobs in parallel with configurable concurrency
+- **Multiple backends**: Redis, PostgreSQL, MySQL, SQLite
+- **Immediate job processing**: Enqueue jobs for immediate execution
+- **Scheduled jobs**: Schedule jobs to run at a future time
+- **Automatic retries**: Configurable retry logic with exponential backoff
+- **Dead letter queue**: Failed jobs are moved to a dead queue for inspection
+- **Graceful shutdown**: Complete in-progress jobs before stopping
+- **Multiple workers**: Process jobs in parallel with configurable concurrency
 
-## Architecture
+## Crates
 
-```
-┌─────────────┐         ┌──────────────────────────────────────┐
-│   Client    │         │           Backend (Storage)          │
-│  (Enqueuer) │         │   Redis | PostgreSQL | MySQL | SQLite │
-└──────┬──────┘         │                                      │
-       │                │  ┌─────────────┐  ┌──────────────┐   │
-       │ immediately    │  │    jobs     │  │   schedule   │   │
-       ├───────────────►│  │   (queue)   │  │  (sorted)    │   │
-       │                │  └──────┬──────┘  └──────┬───────┘   │
-       │ schedule       │         │                │           │
-       └───────────────►│         │                │           │
-                        │  ┌──────▼──────┐  ┌──────▼───────┐   │
-                        │  │    retry    │  │     dead     │   │
-                        │  │  (sorted)   │  │   (queue)    │   │
-                        │  └─────────────┘  └──────────────┘   │
-                        └──────────────────────────────────────┘
-                                    │
-                        ┌───────────▼────────────┐
-                        │      Worker Pool       │
-                        │  ┌─────┐ ┌─────┐       │
-                        │  │ W1  │ │ W2  │ ...   │
-                        │  └─────┘ └─────┘       │
-                        │  ┌──────────────────┐  │
-                        │  │    Scheduler     │  │
-                        │  │   (1s loop)      │  │
-                        │  └──────────────────┘  │
-                        │  ┌──────────────────┐  │
-                        │  │     Retrier      │  │
-                        │  │   (1s loop)      │  │
-                        │  └──────────────────┘  │
-                        └────────────────────────┘
-```
+| Crate | Description |
+|-------|-------------|
+| `wg-core` | Core types, traits, Client, WorkerPool |
+| `wg-redis` | Redis backend (recommended for production) |
+| `wg-postgres` | PostgreSQL backend |
+| `wg-mysql` | MySQL backend |
+| `wg-sqlite` | SQLite backend (great for development/testing) |
 
 ## Installation
 
-Add to your `Cargo.toml`:
+Add the crates you need to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-wg = { path = "path/to/wg", features = ["redis"] }  # or postgres, mysql, sqlite
+wg-core = "0.1"
+wg-redis = "0.1"  # or wg-postgres, wg-mysql, wg-sqlite
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
 
-### Available Features
-
-| Feature | Description |
-|---------|-------------|
-| `redis` | Redis backend (default) |
-| `postgres` | PostgreSQL backend |
-| `mysql` | MySQL backend |
-| `sqlite` | SQLite backend |
-| `full` | All backends |
-
 ## Quick Start
 
-### Define a Job
+### Client (Enqueuing Jobs)
 
 ```rust
+use wg_core::Client;
+use wg_redis::RedisBackend;
 use serde::{Serialize, Deserialize};
+use std::time::Duration;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct EmailJob {
     to: String,
     subject: String,
     body: String,
 }
-```
-
-### Using Redis Backend
-
-```rust
-use wg::Client;
-use std::time::Duration;
 
 #[tokio::main]
-async fn main() -> wg::Result<()> {
-    // Connect using Redis
-    let client = Client::connect("redis://localhost:6379", "myapp").await?;
+async fn main() -> wg_core::Result<()> {
+    // Create backend
+    let backend = RedisBackend::new("redis://localhost", "myapp").await?;
+    let client = Client::new(backend);
     
     // Enqueue for immediate processing
     client.enqueue(EmailJob {
@@ -101,7 +64,7 @@ async fn main() -> wg::Result<()> {
         body: "World".into(),
     }).await?;
     
-    // Schedule for 1 hour later
+    // Schedule for later
     client.schedule(EmailJob {
         to: "user@example.com".into(),
         subject: "Reminder".into(),
@@ -112,109 +75,156 @@ async fn main() -> wg::Result<()> {
 }
 ```
 
-### Using PostgreSQL Backend
+### Worker (Processing Jobs)
 
 ```rust
-use wg::{Client, PostgresBackend};
+use wg_core::{WorkerPool, JobResult, SharedBackend};
+use wg_redis::RedisBackend;
+use serde::{Serialize, Deserialize};
 
-#[tokio::main]
-async fn main() -> wg::Result<()> {
-    let backend = PostgresBackend::new(
-        "postgres://user:pass@localhost/mydb",
-        "myapp"
-    ).await?;
-    
-    let client = Client::new(backend);
-    
-    client.enqueue(EmailJob {
-        to: "user@example.com".into(),
-        subject: "Hello".into(),
-        body: "World".into(),
-    }).await?;
-    
-    Ok(())
+#[derive(Clone, Serialize, Deserialize)]
+struct EmailJob {
+    to: String,
+    subject: String,
+    body: String,
 }
-```
-
-### Using SQLite Backend
-
-```rust
-use wg::{Client, SqliteBackend};
-
-#[tokio::main]
-async fn main() -> wg::Result<()> {
-    // File-based SQLite
-    let backend = SqliteBackend::new("sqlite:jobs.db", "myapp").await?;
-    
-    // Or in-memory (for testing)
-    // let backend = SqliteBackend::in_memory("myapp").await?;
-    
-    let client = Client::new(backend);
-    
-    client.enqueue(EmailJob {
-        to: "user@example.com".into(),
-        subject: "Hello".into(),
-        body: "World".into(),
-    }).await?;
-    
-    Ok(())
-}
-```
-
-### Process Jobs (Worker)
-
-```rust
-use wg::{WorkerPool, JobResult, JobError};
 
 async fn process_email(job: EmailJob) -> JobResult {
     println!("Sending email to: {}", job.to);
-    
-    if job.to.is_empty() {
-        return Err(JobError::fatal("Invalid email address"));
-    }
-    
+    // Send email logic here...
     Ok(())
 }
 
 #[tokio::main]
-async fn main() -> wg::Result<()> {
-    // Using Redis (default)
+async fn main() -> wg_core::Result<()> {
+    let backend = RedisBackend::new("redis://localhost", "myapp").await?;
+    
     let mut pool = WorkerPool::builder()
-        .redis_url("redis://localhost:6379")
+        .backend(backend)
         .namespace("myapp")
         .workers(4)
         .handler(process_email)
-        .build()
-        .await?;
+        .build()?;
     
-    // Blocks until Ctrl+C, then drains in-progress jobs
     pool.run().await?;
-    
     Ok(())
 }
 ```
 
-### Worker with Custom Backend
+## Backend Options
+
+### Redis (Recommended)
+
+Best for production use. Supports blocking pop (BRPOP) for efficient job fetching.
 
 ```rust
-use wg::{WorkerPool, PostgresBackend, JobResult};
+use wg_redis::RedisBackend;
 
-#[tokio::main]
-async fn main() -> wg::Result<()> {
-    let backend = PostgresBackend::new(
-        "postgres://user:pass@localhost/mydb",
-        "myapp"
-    ).await?;
-    
-    let mut pool = WorkerPool::builder()
-        .namespace("myapp")
-        .workers(4)
-        .handler(process_email)
-        .build_with_backend(backend)?;
-    
-    pool.run().await?;
-    
-    Ok(())
+let backend = RedisBackend::new("redis://localhost:6379", "myapp").await?;
+```
+
+### PostgreSQL
+
+Great for when you want your job queue in the same database as your app.
+
+```rust
+use wg_postgres::PostgresBackend;
+
+let backend = PostgresBackend::new("postgres://user:pass@localhost/db", "myapp").await?;
+```
+
+### MySQL
+
+```rust
+use wg_mysql::MySqlBackend;
+
+let backend = MySqlBackend::new("mysql://user:pass@localhost/db", "myapp").await?;
+```
+
+### SQLite
+
+Perfect for development, testing, or embedded applications.
+
+```rust
+use wg_sqlite::SqliteBackend;
+
+// File-based
+let backend = SqliteBackend::new("sqlite:jobs.db", "myapp").await?;
+
+// In-memory (for testing)
+let backend = SqliteBackend::in_memory("myapp").await?;
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                           CLIENT                                 │
+│  ┌─────────┐  ┌──────────┐                                      │
+│  │ enqueue │  │ schedule │                                      │
+│  └────┬────┘  └────┬─────┘                                      │
+│       │            │                                            │
+└───────┼────────────┼────────────────────────────────────────────┘
+        │            │
+        ▼            ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                         BACKEND                                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐  ┌────────┐ │
+│  │  jobs queue  │  │   schedule   │  │    retry    │  │  dead  │ │
+│  │   (LIST)     │  │   (ZSET)     │  │   (ZSET)    │  │ (LIST) │ │
+│  └───────┬──────┘  └──────┬───────┘  └──────┬──────┘  └────────┘ │
+│          │                │                 │                     │
+└──────────┼────────────────┼─────────────────┼─────────────────────┘
+           │                │                 │
+           ▼                ▼                 ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                        WORKER POOL                                │
+│  ┌───────────────────────────────────────────────────────────┐   │
+│  │                      Scheduler                             │   │
+│  │   Moves due jobs from schedule queue to jobs queue         │   │
+│  └───────────────────────────────────────────────────────────┘   │
+│  ┌───────────────────────────────────────────────────────────┐   │
+│  │                       Retrier                              │   │
+│  │   Moves due jobs from retry queue to jobs queue            │   │
+│  └───────────────────────────────────────────────────────────┘   │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐               │
+│  │ Worker  │ │ Worker  │ │ Worker  │ │ Worker  │  ...          │
+│  │   #1    │ │   #2    │ │   #3    │ │   #4    │               │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘               │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+## Job Options
+
+```rust
+use wg_core::{JobOptions, Job};
+use std::time::Duration;
+
+let options = JobOptions::with_max_retries(5)
+    .timeout(Duration::from_secs(60))
+    .retry_delay(Duration::from_secs(30));
+
+// Enqueue with custom options
+client.enqueue_with_options(my_job, options).await?;
+```
+
+## Error Handling
+
+```rust
+use wg_core::{JobResult, JobError};
+
+async fn process_job(job: MyJob) -> JobResult {
+    match do_work(&job).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.is_temporary() => {
+            // Retryable error - job will be retried
+            Err(JobError::retryable(e.to_string()))
+        }
+        Err(e) => {
+            // Fatal error - job goes to dead queue
+            Err(JobError::fatal(e.to_string()))
+        }
+    }
 }
 ```
 
@@ -222,110 +232,46 @@ async fn main() -> wg::Result<()> {
 
 | Feature | Redis | PostgreSQL | MySQL | SQLite |
 |---------|-------|------------|-------|--------|
-| Performance | Excellent | Good | Good | Moderate |
-| Blocking pop | Native BRPOP | Polling | Polling | Polling |
-| Clustering | Yes | Yes | Yes | No |
-| Persistence | Optional | Yes | Yes | Yes |
-| Best for | High throughput | Existing PG infra | Existing MySQL infra | Testing/Embedded |
+| Blocking pop | ✓ | Polling | Polling | Polling |
+| Performance | Excellent | Good | Good | Fair |
+| Persistence | Optional | ✓ | ✓ | ✓ |
+| Distributed | ✓ | ✓ | ✓ | ✗ |
+| ACID | Partial | ✓ | ✓ | ✓ |
 
-## Configuration
+## SQL Schema
 
-### WorkerConfig Options
+SQL backends automatically create the following tables:
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `redis_url` | `redis://127.0.0.1:6379` | Redis connection URL |
-| `namespace` | `wg` | Prefix for all keys/tables |
-| `num_workers` | `4` | Number of parallel workers |
-| `fetch_timeout` | `5s` | Pop timeout |
-| `scheduler_interval` | `1s` | How often to check scheduled jobs |
-| `retrier_interval` | `1s` | How often to check retry queue |
-| `batch_size` | `100` | Jobs to move per scheduler/retrier tick |
-| `shutdown_timeout` | `30s` | Max time to wait for draining |
+```sql
+-- Jobs queue (immediate processing)
+CREATE TABLE {namespace}_jobs (
+    id BIGSERIAL PRIMARY KEY,
+    job_json TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
 
-### JobOptions
+-- Scheduled jobs
+CREATE TABLE {namespace}_scheduled (
+    id BIGSERIAL PRIMARY KEY,
+    job_json TEXT NOT NULL,
+    run_at BIGINT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
 
-```rust
-use wg::JobOptions;
-use std::time::Duration;
+-- Retry queue
+CREATE TABLE {namespace}_retry (
+    id BIGSERIAL PRIMARY KEY,
+    job_json TEXT NOT NULL,
+    retry_at BIGINT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
 
-let options = JobOptions::with_max_retries(5)
-    .timeout(Duration::from_secs(60))
-    .retry_delay(Duration::from_secs(30));
-
-client.enqueue_with_options(my_job, options).await?;
-```
-
-## Error Handling
-
-Job handlers return `JobResult`:
-
-```rust
-use wg::{JobResult, JobError};
-
-async fn my_handler(job: MyJob) -> JobResult {
-    // Retryable error - job will be retried with exponential backoff
-    if temporary_failure {
-        return Err(JobError::retryable("Service unavailable"));
-    }
-    
-    // Fatal error - job goes directly to dead queue
-    if permanent_failure {
-        return Err(JobError::fatal("Invalid data"));
-    }
-    
-    Ok(())
-}
-```
-
-## Storage Schema
-
-### Redis
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `{namespace}:jobs` | LIST | Jobs ready for processing |
-| `{namespace}:schedule` | ZSET | Scheduled jobs (score = timestamp) |
-| `{namespace}:retry` | ZSET | Jobs waiting for retry |
-| `{namespace}:dead` | LIST | Failed jobs |
-
-### SQL (PostgreSQL/MySQL/SQLite)
-
-Tables are auto-created with the namespace prefix:
-
-| Table | Description |
-|-------|-------------|
-| `{namespace}_jobs` | Immediate job queue (FIFO) |
-| `{namespace}_scheduled` | Scheduled jobs with `run_at` column |
-| `{namespace}_retry` | Retry queue with `retry_at` column |
-| `{namespace}_dead` | Dead letter queue |
-
-## Graceful Shutdown
-
-When receiving SIGINT (Ctrl+C):
-
-1. Workers stop fetching new jobs (draining mode)
-2. In-progress jobs are allowed to complete
-3. Scheduler and retrier stop
-4. Pool exits after all jobs complete or timeout
-
-## Custom Backend
-
-You can implement your own backend by implementing the `Backend` trait:
-
-```rust
-use wg::Backend;
-use async_trait::async_trait;
-
-#[derive(Clone)]
-struct MyBackend { /* ... */ }
-
-#[async_trait]
-impl Backend for MyBackend {
-    async fn push_job(&self, job_json: &str) -> wg::Result<()> { /* ... */ }
-    async fn pop_job(&self, timeout: Duration) -> wg::Result<Option<String>> { /* ... */ }
-    // ... implement other methods
-}
+-- Dead letter queue
+CREATE TABLE {namespace}_dead (
+    id BIGSERIAL PRIMARY KEY,
+    job_json TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
 ```
 
 ## License

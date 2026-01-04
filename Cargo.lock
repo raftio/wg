@@ -1711,18 +1711,59 @@ dependencies = [
 ]
 
 [[package]]
-name = "wg"
+name = "wg-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "redis",
  "serde",
  "serde_json",
- "sqlx",
  "thiserror",
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "wg-mysql"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "wg-core",
+]
+
+[[package]]
+name = "wg-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "wg-core",
+]
+
+[[package]]
+name = "wg-redis"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "redis",
+ "tracing",
+ "wg-core",
+]
+
+[[package]]
+name = "wg-sqlite"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "wg-core",
 ]
 
 [[package]]

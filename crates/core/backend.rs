@@ -9,35 +9,10 @@ use std::time::Duration;
 
 use crate::error::Result;
 
-#[cfg(feature = "redis")]
-pub mod redis;
-
-#[cfg(feature = "postgres")]
-pub mod postgres;
-
-#[cfg(feature = "mysql")]
-pub mod mysql;
-
-#[cfg(feature = "sqlite")]
-pub mod sqlite;
-
-// Re-exports
-#[cfg(feature = "redis")]
-pub use self::redis::{RedisBackend, RedisKeys};
-
-#[cfg(feature = "postgres")]
-pub use self::postgres::PostgresBackend;
-
-#[cfg(feature = "mysql")]
-pub use self::mysql::MySqlBackend;
-
-#[cfg(feature = "sqlite")]
-pub use self::sqlite::SqliteBackend;
-
 /// Backend trait for job queue storage operations.
 ///
 /// This trait defines all the operations needed for a job queue backend.
-/// Implementations must be thread-safe (Send + Sync) and cloneable.
+/// Implementations must be thread-safe (Send + Sync).
 #[async_trait]
 pub trait Backend: Send + Sync {
     /// Push a job to the immediate processing queue.

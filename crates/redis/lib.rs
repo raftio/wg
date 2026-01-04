@@ -1,12 +1,26 @@
-//! Redis backend implementation.
+//! Redis backend for wg job queue.
+//!
+//! This crate provides a Redis-based storage backend for the wg job queue.
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! use wg_redis::RedisBackend;
+//! use wg_core::Client;
+//!
+//! #[tokio::main]
+//! async fn main() -> wg_core::Result<()> {
+//!     let backend = RedisBackend::new("redis://localhost", "myapp").await?;
+//!     let client = Client::new(backend);
+//!     Ok(())
+//! }
+//! ```
 
 use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use std::time::Duration;
-
-use crate::backend::Backend;
-use crate::error::Result;
+use wg_core::{Backend, Result, WgError};
 
 /// Manages Redis keys with a namespace prefix.
 #[derive(Debug, Clone)]
@@ -58,8 +72,10 @@ pub struct RedisBackend {
 impl RedisBackend {
     /// Create a new Redis backend.
     pub async fn new(redis_url: &str, namespace: &str) -> Result<Self> {
-        let client = redis::Client::open(redis_url)?;
-        let conn = ConnectionManager::new(client).await?;
+        let client = redis::Client::open(redis_url).map_err(|e| WgError::Backend(e.to_string()))?;
+        let conn = ConnectionManager::new(client)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         let keys = RedisKeys::new(namespace);
         Ok(Self { conn, keys })
     }
@@ -82,7 +98,9 @@ impl RedisBackend {
 impl Backend for RedisBackend {
     async fn push_job(&self, job_json: &str) -> Result<()> {
         let mut conn = self.conn.clone();
-        conn.lpush::<_, _, ()>(self.keys.jobs(), job_json).await?;
+        conn.lpush::<_, _, ()>(self.keys.jobs(), job_json)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(())
     }
 
@@ -90,14 +108,16 @@ impl Backend for RedisBackend {
         let mut conn = self.conn.clone();
         let result: Option<(String, String)> = conn
             .brpop(self.keys.jobs(), timeout.as_secs() as f64)
-            .await?;
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(result.map(|(_, json)| json))
     }
 
     async fn schedule_job(&self, job_json: &str, run_at: i64) -> Result<()> {
         let mut conn = self.conn.clone();
         conn.zadd::<_, _, _, ()>(self.keys.schedule(), job_json, run_at)
-            .await?;
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(())
     }
 
@@ -105,21 +125,24 @@ impl Backend for RedisBackend {
         let mut conn = self.conn.clone();
         let jobs: Vec<String> = conn
             .zrangebyscore_limit(self.keys.schedule(), "-inf", now, 0, limit as isize)
-            .await?;
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(jobs)
     }
 
     async fn remove_scheduled(&self, job_json: &str) -> Result<()> {
         let mut conn = self.conn.clone();
         conn.zrem::<_, _, ()>(self.keys.schedule(), job_json)
-            .await?;
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(())
     }
 
     async fn retry_job(&self, job_json: &str, retry_at: i64) -> Result<()> {
         let mut conn = self.conn.clone();
         conn.zadd::<_, _, _, ()>(self.keys.retry(), job_json, retry_at)
-            .await?;
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(())
     }
 
@@ -127,43 +150,60 @@ impl Backend for RedisBackend {
         let mut conn = self.conn.clone();
         let jobs: Vec<String> = conn
             .zrangebyscore_limit(self.keys.retry(), "-inf", now, 0, limit as isize)
-            .await?;
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(jobs)
     }
 
     async fn remove_retry(&self, job_json: &str) -> Result<()> {
         let mut conn = self.conn.clone();
-        conn.zrem::<_, _, ()>(self.keys.retry(), job_json).await?;
+        conn.zrem::<_, _, ()>(self.keys.retry(), job_json)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(())
     }
 
     async fn push_dead(&self, job_json: &str) -> Result<()> {
         let mut conn = self.conn.clone();
-        conn.lpush::<_, _, ()>(self.keys.dead(), job_json).await?;
+        conn.lpush::<_, _, ()>(self.keys.dead(), job_json)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(())
     }
 
     async fn queue_len(&self) -> Result<usize> {
         let mut conn = self.conn.clone();
-        let len: usize = conn.llen(self.keys.jobs()).await?;
+        let len: usize = conn
+            .llen(self.keys.jobs())
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(len)
     }
 
     async fn schedule_len(&self) -> Result<usize> {
         let mut conn = self.conn.clone();
-        let len: usize = conn.zcard(self.keys.schedule()).await?;
+        let len: usize = conn
+            .zcard(self.keys.schedule())
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(len)
     }
 
     async fn retry_len(&self) -> Result<usize> {
         let mut conn = self.conn.clone();
-        let len: usize = conn.zcard(self.keys.retry()).await?;
+        let len: usize = conn
+            .zcard(self.keys.retry())
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(len)
     }
 
     async fn dead_len(&self) -> Result<usize> {
         let mut conn = self.conn.clone();
-        let len: usize = conn.llen(self.keys.dead()).await?;
+        let len: usize = conn
+            .llen(self.keys.dead())
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(len)
     }
 
@@ -178,7 +218,9 @@ impl Backend for RedisBackend {
             .zrem(&schedule_key, job_json)
             .lpush(&jobs_key, job_json);
 
-        pipe.query_async::<()>(&mut conn).await?;
+        pipe.query_async::<()>(&mut conn)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(())
     }
 
@@ -193,7 +235,9 @@ impl Backend for RedisBackend {
             .zrem(&retry_key, job_json)
             .lpush(&jobs_key, job_json);
 
-        pipe.query_async::<()>(&mut conn).await?;
+        pipe.query_async::<()>(&mut conn)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(())
     }
 }
