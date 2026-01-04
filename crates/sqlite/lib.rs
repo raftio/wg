@@ -375,3 +375,324 @@ impl Backend for SqliteBackend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn create_test_backend() -> SqliteBackend {
+        SqliteBackend::in_memory("test").await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_creation() {
+        let backend = create_test_backend().await;
+        assert_eq!(backend.queue_len().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_push_and_pop_job() {
+        let backend = create_test_backend().await;
+
+        backend
+            .push_job(r#"{"id": "1", "data": "test"}"#)
+            .await
+            .unwrap();
+        assert_eq!(backend.queue_len().await.unwrap(), 1);
+
+        let job = backend.pop_job(Duration::from_millis(100)).await.unwrap();
+        assert!(job.is_some());
+        assert!(job.unwrap().contains("test"));
+        assert_eq!(backend.queue_len().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pop_empty_queue_timeout() {
+        let backend = create_test_backend().await;
+
+        let start = std::time::Instant::now();
+        let job = backend.pop_job(Duration::from_millis(200)).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(job.is_none());
+        assert!(elapsed >= Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn test_fifo_ordering() {
+        let backend = create_test_backend().await;
+
+        backend.push_job(r#"{"order": 1}"#).await.unwrap();
+        backend.push_job(r#"{"order": 2}"#).await.unwrap();
+        backend.push_job(r#"{"order": 3}"#).await.unwrap();
+
+        let job1 = backend
+            .pop_job(Duration::from_millis(100))
+            .await
+            .unwrap()
+            .unwrap();
+        let job2 = backend
+            .pop_job(Duration::from_millis(100))
+            .await
+            .unwrap()
+            .unwrap();
+        let job3 = backend
+            .pop_job(Duration::from_millis(100))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(job1.contains("1"));
+        assert!(job2.contains("2"));
+        assert!(job3.contains("3"));
+    }
+
+    #[tokio::test]
+    async fn test_schedule_job() {
+        let backend = create_test_backend().await;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        backend
+            .schedule_job(r#"{"id": "sched1"}"#, now - 10)
+            .await
+            .unwrap();
+        backend
+            .schedule_job(r#"{"id": "sched2"}"#, now + 3600)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.schedule_len().await.unwrap(), 2);
+
+        // Get due jobs (only the one in the past)
+        let due = backend.get_due_scheduled(now, 10).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert!(due[0].contains("sched1"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_scheduled() {
+        let backend = create_test_backend().await;
+        let job = r#"{"id": "to_remove"}"#;
+
+        backend.schedule_job(job, 12345).await.unwrap();
+        assert_eq!(backend.schedule_len().await.unwrap(), 1);
+
+        backend.remove_scheduled(job).await.unwrap();
+        assert_eq!(backend.schedule_len().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_retry_job() {
+        let backend = create_test_backend().await;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        backend
+            .retry_job(r#"{"id": "retry1"}"#, now - 10)
+            .await
+            .unwrap();
+        backend
+            .retry_job(r#"{"id": "retry2"}"#, now + 3600)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.retry_len().await.unwrap(), 2);
+
+        // Get due retries (only the one in the past)
+        let due = backend.get_due_retries(now, 10).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert!(due[0].contains("retry1"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_retry() {
+        let backend = create_test_backend().await;
+        let job = r#"{"id": "retry_remove"}"#;
+
+        backend.retry_job(job, 12345).await.unwrap();
+        assert_eq!(backend.retry_len().await.unwrap(), 1);
+
+        backend.remove_retry(job).await.unwrap();
+        assert_eq!(backend.retry_len().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_dead_queue() {
+        let backend = create_test_backend().await;
+
+        backend
+            .push_dead(r#"{"id": "dead1", "error": "failed"}"#)
+            .await
+            .unwrap();
+        backend
+            .push_dead(r#"{"id": "dead2", "error": "timeout"}"#)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.dead_len().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_dead_pagination() {
+        let backend = create_test_backend().await;
+
+        for i in 0..5 {
+            backend
+                .push_dead(&format!(r#"{{"id": "dead{}"}}"#, i))
+                .await
+                .unwrap();
+        }
+
+        // List first 2
+        let page1 = backend.list_dead(2, 0).await.unwrap();
+        assert_eq!(page1.len(), 2);
+
+        // List next 2
+        let page2 = backend.list_dead(2, 2).await.unwrap();
+        assert_eq!(page2.len(), 2);
+
+        // List remaining
+        let page3 = backend.list_dead(2, 4).await.unwrap();
+        assert_eq!(page3.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_dead_by_id() {
+        let backend = create_test_backend().await;
+
+        backend
+            .push_dead(r#"{"id": {"0": "abc-123"}, "error": "test"}"#)
+            .await
+            .unwrap();
+        backend
+            .push_dead(r#"{"id": {"0": "def-456"}, "error": "other"}"#)
+            .await
+            .unwrap();
+
+        let found = backend.get_dead_by_id("abc-123").await.unwrap();
+        assert!(found.is_some());
+        assert!(found.unwrap().contains("abc-123"));
+
+        let not_found = backend.get_dead_by_id("xyz-999").await.unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_remove_dead() {
+        let backend = create_test_backend().await;
+        let job = r#"{"id": "to_delete"}"#;
+
+        backend.push_dead(job).await.unwrap();
+        assert_eq!(backend.dead_len().await.unwrap(), 1);
+
+        backend.remove_dead(job).await.unwrap();
+        assert_eq!(backend.dead_len().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_move_scheduled_to_queue() {
+        let backend = create_test_backend().await;
+        let job = r#"{"id": "moveme"}"#;
+
+        backend.schedule_job(job, 12345).await.unwrap();
+        assert_eq!(backend.schedule_len().await.unwrap(), 1);
+        assert_eq!(backend.queue_len().await.unwrap(), 0);
+
+        backend.move_scheduled_to_queue(job).await.unwrap();
+        assert_eq!(backend.schedule_len().await.unwrap(), 0);
+        assert_eq!(backend.queue_len().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_move_retry_to_queue() {
+        let backend = create_test_backend().await;
+        let job = r#"{"id": "retry_move"}"#;
+
+        backend.retry_job(job, 12345).await.unwrap();
+        assert_eq!(backend.retry_len().await.unwrap(), 1);
+        assert_eq!(backend.queue_len().await.unwrap(), 0);
+
+        backend.move_retry_to_queue(job).await.unwrap();
+        assert_eq!(backend.retry_len().await.unwrap(), 0);
+        assert_eq!(backend.queue_len().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_isolation() {
+        let backend1 = SqliteBackend::in_memory("ns1").await.unwrap();
+        let backend2 = SqliteBackend::in_memory("ns2").await.unwrap();
+
+        backend1.push_job(r#"{"ns": "1"}"#).await.unwrap();
+
+        // Different backends have different namespaces (and different in-memory DBs)
+        assert_eq!(backend1.queue_len().await.unwrap(), 1);
+        assert_eq!(backend2.queue_len().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_queue_len_operations() {
+        let backend = create_test_backend().await;
+
+        assert_eq!(backend.queue_len().await.unwrap(), 0);
+        assert_eq!(backend.schedule_len().await.unwrap(), 0);
+        assert_eq!(backend.retry_len().await.unwrap(), 0);
+        assert_eq!(backend.dead_len().await.unwrap(), 0);
+
+        backend.push_job(r#"{"id": "1"}"#).await.unwrap();
+        backend.push_job(r#"{"id": "2"}"#).await.unwrap();
+        assert_eq!(backend.queue_len().await.unwrap(), 2);
+
+        backend.schedule_job(r#"{"id": "s1"}"#, 100).await.unwrap();
+        assert_eq!(backend.schedule_len().await.unwrap(), 1);
+
+        backend.retry_job(r#"{"id": "r1"}"#, 100).await.unwrap();
+        backend.retry_job(r#"{"id": "r2"}"#, 200).await.unwrap();
+        assert_eq!(backend.retry_len().await.unwrap(), 2);
+
+        backend.push_dead(r#"{"id": "d1"}"#).await.unwrap();
+        assert_eq!(backend.dead_len().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_due_scheduled_limit() {
+        let backend = create_test_backend().await;
+        let now = 1000i64;
+
+        // Add 5 due jobs
+        for i in 0..5 {
+            backend
+                .schedule_job(&format!(r#"{{"id": "{}"}}"#, i), now - 10)
+                .await
+                .unwrap();
+        }
+
+        // Request only 3
+        let due = backend.get_due_scheduled(now, 3).await.unwrap();
+        assert_eq!(due.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_due_retries_limit() {
+        let backend = create_test_backend().await;
+        let now = 1000i64;
+
+        // Add 5 due retries
+        for i in 0..5 {
+            backend
+                .retry_job(&format!(r#"{{"id": "{}"}}"#, i), now - 10)
+                .await
+                .unwrap();
+        }
+
+        // Request only 2
+        let due = backend.get_due_retries(now, 2).await.unwrap();
+        assert_eq!(due.len(), 2);
+    }
+}

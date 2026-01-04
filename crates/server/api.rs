@@ -272,3 +272,169 @@ async fn delete_dead(state: web::Data<AppState>, path: web::Path<String>) -> imp
         message: format!("Job {} deleted", job_id),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_limit() {
+        assert_eq!(default_limit(), 20);
+    }
+
+    #[test]
+    fn test_health_response_serialization() {
+        let response = HealthResponse { status: "ok" };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"status":"ok"}"#);
+    }
+
+    #[test]
+    fn test_stats_response_serialization() {
+        let response = StatsResponse {
+            queue: 10,
+            scheduled: 5,
+            retry: 2,
+            dead: 1,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["queue"], 10);
+        assert_eq!(parsed["scheduled"], 5);
+        assert_eq!(parsed["retry"], 2);
+        assert_eq!(parsed["dead"], 1);
+    }
+
+    #[test]
+    fn test_enqueue_request_deserialization() {
+        let json = r#"{"payload": {"task": "send_email", "to": "test@example.com"}}"#;
+        let request: EnqueueRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(request.payload["task"], "send_email");
+        assert_eq!(request.payload["to"], "test@example.com");
+    }
+
+    #[test]
+    fn test_enqueue_response_serialization() {
+        let response = EnqueueResponse {
+            success: true,
+            message: "Job created".to_string(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["success"], true);
+        assert_eq!(parsed["message"], "Job created");
+    }
+
+    #[test]
+    fn test_dead_job_item_serialization() {
+        let item = DeadJobItem {
+            id: "abc-123".to_string(),
+            payload: serde_json::json!({"task": "failed"}),
+            created_at: 1704067200,
+            last_error: Some("timeout".to_string()),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["id"], "abc-123");
+        assert_eq!(parsed["payload"]["task"], "failed");
+        assert_eq!(parsed["created_at"], 1704067200);
+        assert_eq!(parsed["last_error"], "timeout");
+    }
+
+    #[test]
+    fn test_dead_job_item_serialization_no_error() {
+        let item = DeadJobItem {
+            id: "def-456".to_string(),
+            payload: serde_json::json!({}),
+            created_at: 0,
+            last_error: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed["last_error"].is_null());
+    }
+
+    #[test]
+    fn test_dead_list_response_serialization() {
+        let response = DeadListResponse {
+            jobs: vec![
+                DeadJobItem {
+                    id: "job1".to_string(),
+                    payload: serde_json::json!({"n": 1}),
+                    created_at: 100,
+                    last_error: None,
+                },
+                DeadJobItem {
+                    id: "job2".to_string(),
+                    payload: serde_json::json!({"n": 2}),
+                    created_at: 200,
+                    last_error: Some("error".to_string()),
+                },
+            ],
+            total: 2,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["total"], 2);
+        assert_eq!(parsed["jobs"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_dead_list_query_defaults() {
+        let json = r#"{}"#;
+        let query: DeadListQuery = serde_json::from_str(json).unwrap();
+
+        assert_eq!(query.limit, 20);
+        assert_eq!(query.offset, 0);
+    }
+
+    #[test]
+    fn test_dead_list_query_custom_values() {
+        let json = r#"{"limit": 50, "offset": 100}"#;
+        let query: DeadListQuery = serde_json::from_str(json).unwrap();
+
+        assert_eq!(query.limit, 50);
+        assert_eq!(query.offset, 100);
+    }
+
+    #[test]
+    fn test_dead_list_query_partial_values() {
+        let json = r#"{"limit": 10}"#;
+        let query: DeadListQuery = serde_json::from_str(json).unwrap();
+
+        assert_eq!(query.limit, 10);
+        assert_eq!(query.offset, 0);
+    }
+
+    #[test]
+    fn test_api_response_serialization() {
+        let response = ApiResponse {
+            success: false,
+            message: "Something went wrong".to_string(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["success"], false);
+        assert_eq!(parsed["message"], "Something went wrong");
+    }
+
+    #[test]
+    fn test_dead_list_response_empty() {
+        let response = DeadListResponse {
+            jobs: vec![],
+            total: 0,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["total"], 0);
+        assert!(parsed["jobs"].as_array().unwrap().is_empty());
+    }
+}

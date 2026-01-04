@@ -257,4 +257,219 @@ mod tests {
         options = options.increment_retry();
         assert!(!options.can_retry());
     }
+
+    #[test]
+    fn test_job_id_uniqueness() {
+        let id1 = JobId::new();
+        let id2 = JobId::new();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_job_id_display() {
+        let id = JobId::new();
+        let display = format!("{}", id);
+        // UUID v4 format: 8-4-4-4-12 hex characters
+        assert_eq!(display.len(), 36);
+        assert!(display.chars().filter(|c| *c == '-').count() == 4);
+    }
+
+    #[test]
+    fn test_job_id_default() {
+        let id1 = JobId::default();
+        let id2 = JobId::default();
+        // Default creates unique IDs
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_job_id_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        let id = JobId::new();
+        set.insert(id.clone());
+        assert!(set.contains(&id));
+    }
+
+    #[test]
+    fn test_job_options_default() {
+        let options = JobOptions::default();
+        assert_eq!(options.max_retries, 3);
+        assert_eq!(options.retry_count, 0);
+        assert_eq!(options.timeout, Some(Duration::from_secs(300)));
+        assert_eq!(options.retry_delay, Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn test_job_options_with_max_retries() {
+        let options = JobOptions::with_max_retries(5);
+        assert_eq!(options.max_retries, 5);
+        assert_eq!(options.retry_count, 0);
+    }
+
+    #[test]
+    fn test_job_options_timeout_builder() {
+        let options = JobOptions::default().timeout(Duration::from_secs(60));
+        assert_eq!(options.timeout, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_job_options_retry_delay_builder() {
+        let options = JobOptions::default().retry_delay(Duration::from_secs(30));
+        assert_eq!(options.retry_delay, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn test_job_options_exponential_backoff() {
+        let mut options = JobOptions::default().retry_delay(Duration::from_secs(10));
+
+        // First retry: 10 * 2^0 = 10 seconds
+        assert_eq!(options.next_retry_delay(), Duration::from_secs(10));
+
+        options = options.increment_retry();
+        // Second retry: 10 * 2^1 = 20 seconds
+        assert_eq!(options.next_retry_delay(), Duration::from_secs(20));
+
+        options = options.increment_retry();
+        // Third retry: 10 * 2^2 = 40 seconds
+        assert_eq!(options.next_retry_delay(), Duration::from_secs(40));
+
+        options = options.increment_retry();
+        // Fourth retry: 10 * 2^3 = 80 seconds
+        assert_eq!(options.next_retry_delay(), Duration::from_secs(80));
+    }
+
+    #[test]
+    fn test_job_options_exponential_backoff_no_delay() {
+        // When retry_delay is None, default to 10 seconds
+        let options = JobOptions {
+            max_retries: 3,
+            retry_count: 0,
+            timeout: None,
+            retry_delay: None,
+        };
+        assert_eq!(options.next_retry_delay(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_job_options_can_retry_zero_max() {
+        let options = JobOptions::with_max_retries(0);
+        assert!(!options.can_retry());
+    }
+
+    #[test]
+    fn test_job_status_equality() {
+        assert_eq!(JobStatus::Pending, JobStatus::Pending);
+        assert_ne!(JobStatus::Pending, JobStatus::Completed);
+    }
+
+    #[test]
+    fn test_job_status_serialization() {
+        let status = JobStatus::Processing;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"Processing\"");
+
+        let deserialized: JobStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, JobStatus::Processing);
+    }
+
+    #[test]
+    fn test_job_with_options() {
+        let options = JobOptions::with_max_retries(5).timeout(Duration::from_secs(60));
+        let job = Job::with_options(
+            TestPayload {
+                message: "custom".to_string(),
+            },
+            options,
+        );
+        assert_eq!(job.options.max_retries, 5);
+        assert_eq!(job.options.timeout, Some(Duration::from_secs(60)));
+        assert_eq!(job.status, JobStatus::Pending);
+    }
+
+    #[test]
+    fn test_job_schedule_at() {
+        let job = Job::new(TestPayload {
+            message: "scheduled".to_string(),
+        });
+        let run_at = chrono_timestamp() + 3600; // 1 hour from now
+        let scheduled_job = job.schedule_at(run_at);
+
+        assert_eq!(scheduled_job.status, JobStatus::Scheduled);
+        assert_eq!(scheduled_job.scheduled_at, Some(run_at));
+    }
+
+    #[test]
+    fn test_job_schedule_in() {
+        let before = chrono_timestamp();
+        let job = Job::new(TestPayload {
+            message: "delayed".to_string(),
+        });
+        let scheduled_job = job.schedule_in(Duration::from_secs(3600));
+        let after = chrono_timestamp();
+
+        assert_eq!(scheduled_job.status, JobStatus::Scheduled);
+        // scheduled_at should be approximately now + 3600
+        let scheduled_at = scheduled_job.scheduled_at.unwrap();
+        assert!(scheduled_at >= before + 3600);
+        assert!(scheduled_at <= after + 3600);
+    }
+
+    #[test]
+    fn test_job_created_at_is_set() {
+        let before = chrono_timestamp();
+        let job = Job::new(TestPayload {
+            message: "test".to_string(),
+        });
+        let after = chrono_timestamp();
+
+        assert!(job.created_at >= before);
+        assert!(job.created_at <= after);
+    }
+
+    #[test]
+    fn test_job_initial_state() {
+        let job = Job::new(TestPayload {
+            message: "test".to_string(),
+        });
+        assert!(job.scheduled_at.is_none());
+        assert!(job.last_error.is_none());
+    }
+
+    #[test]
+    fn test_job_id_serialization() {
+        let id = JobId::new();
+        let json = serde_json::to_string(&id).unwrap();
+        let deserialized: JobId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, deserialized);
+    }
+
+    #[test]
+    fn test_duration_serde_roundtrip() {
+        let options = JobOptions::default()
+            .timeout(Duration::from_millis(12345))
+            .retry_delay(Duration::from_millis(5000));
+
+        let json = serde_json::to_string(&options).unwrap();
+        let deserialized: JobOptions = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.timeout, Some(Duration::from_millis(12345)));
+        assert_eq!(deserialized.retry_delay, Some(Duration::from_millis(5000)));
+    }
+
+    #[test]
+    fn test_duration_serde_none() {
+        let options = JobOptions {
+            max_retries: 3,
+            retry_count: 0,
+            timeout: None,
+            retry_delay: None,
+        };
+
+        let json = serde_json::to_string(&options).unwrap();
+        let deserialized: JobOptions = serde_json::from_str(&json).unwrap();
+
+        assert!(deserialized.timeout.is_none());
+        assert!(deserialized.retry_delay.is_none());
+    }
 }

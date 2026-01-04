@@ -129,3 +129,81 @@ impl WorkerConfig {
         WorkerConfigBuilder::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_client_config_new() {
+        let config = ClientConfig::new("redis://localhost", "myapp");
+        assert_eq!(config.url, "redis://localhost");
+        assert_eq!(config.namespace, "myapp");
+    }
+
+    #[test]
+    fn test_client_config_with_string() {
+        let config = ClientConfig::new(String::from("postgres://db"), String::from("test"));
+        assert_eq!(config.url, "postgres://db");
+        assert_eq!(config.namespace, "test");
+    }
+
+    #[test]
+    fn test_worker_config_default() {
+        let config = WorkerConfig::default();
+        assert_eq!(config.url, "");
+        assert_eq!(config.namespace, "wg");
+        assert_eq!(config.num_workers, 4);
+        assert_eq!(config.fetch_timeout, Duration::from_secs(5));
+        assert_eq!(config.scheduler_interval, Duration::from_secs(1));
+        assert_eq!(config.retrier_interval, Duration::from_secs(1));
+        assert_eq!(config.batch_size, 100);
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_worker_config_builder_defaults() {
+        let config = WorkerConfigBuilder::new().build();
+        assert_eq!(config.url, "");
+        assert_eq!(config.namespace, "wg");
+        assert_eq!(config.num_workers, 4);
+    }
+
+    #[test]
+    fn test_worker_config_builder_fluent() {
+        let config = WorkerConfig::builder()
+            .url("redis://localhost:6379")
+            .namespace("production")
+            .num_workers(8)
+            .fetch_timeout(Duration::from_secs(10))
+            .scheduler_interval(Duration::from_millis(500))
+            .retrier_interval(Duration::from_millis(500))
+            .batch_size(50)
+            .shutdown_timeout(Duration::from_secs(60))
+            .build();
+
+        assert_eq!(config.url, "redis://localhost:6379");
+        assert_eq!(config.namespace, "production");
+        assert_eq!(config.num_workers, 8);
+        assert_eq!(config.fetch_timeout, Duration::from_secs(10));
+        assert_eq!(config.scheduler_interval, Duration::from_millis(500));
+        assert_eq!(config.retrier_interval, Duration::from_millis(500));
+        assert_eq!(config.batch_size, 50);
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_worker_config_builder_partial() {
+        let config = WorkerConfig::builder()
+            .namespace("custom")
+            .num_workers(2)
+            .build();
+
+        // Modified values
+        assert_eq!(config.namespace, "custom");
+        assert_eq!(config.num_workers, 2);
+        // Default values preserved
+        assert_eq!(config.url, "");
+        assert_eq!(config.fetch_timeout, Duration::from_secs(5));
+    }
+}

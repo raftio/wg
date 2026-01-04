@@ -117,3 +117,152 @@ impl ServerConfig {
         ServerConfigBuilder::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_server_config_default() {
+        let config = ServerConfig::default();
+        assert_eq!(config.api_addr, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.num_workers, 4);
+        assert_eq!(config.namespace, "wg");
+        assert_eq!(config.fetch_timeout, Duration::from_secs(5));
+        assert_eq!(config.scheduler_interval, Duration::from_secs(1));
+        assert_eq!(config.retrier_interval, Duration::from_secs(1));
+        assert_eq!(config.batch_size, 100);
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_server_config_builder_defaults() {
+        let config = ServerConfigBuilder::new().build();
+        assert_eq!(config.api_addr, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.num_workers, 4);
+        assert_eq!(config.namespace, "wg");
+    }
+
+    #[test]
+    fn test_server_config_builder_api_addr() {
+        let addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();
+        let config = ServerConfig::builder().api_addr(addr).build();
+        assert_eq!(config.api_addr, addr);
+    }
+
+    #[test]
+    fn test_server_config_builder_api_addr_str_valid() {
+        let config = ServerConfig::builder()
+            .api_addr_str("192.168.1.1:9000")
+            .unwrap()
+            .build();
+        assert_eq!(config.api_addr, "192.168.1.1:9000".parse().unwrap());
+    }
+
+    #[test]
+    fn test_server_config_builder_api_addr_str_invalid() {
+        let result = ServerConfig::builder().api_addr_str("not-an-address");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_server_config_builder_namespace() {
+        let config = ServerConfig::builder().namespace("production").build();
+        assert_eq!(config.namespace, "production");
+    }
+
+    #[test]
+    fn test_server_config_builder_num_workers() {
+        let config = ServerConfig::builder().num_workers(16).build();
+        assert_eq!(config.num_workers, 16);
+    }
+
+    #[test]
+    fn test_server_config_builder_fetch_timeout() {
+        let config = ServerConfig::builder()
+            .fetch_timeout(Duration::from_secs(10))
+            .build();
+        assert_eq!(config.fetch_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_server_config_builder_scheduler_interval() {
+        let config = ServerConfig::builder()
+            .scheduler_interval(Duration::from_millis(500))
+            .build();
+        assert_eq!(config.scheduler_interval, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_server_config_builder_retrier_interval() {
+        let config = ServerConfig::builder()
+            .retrier_interval(Duration::from_millis(250))
+            .build();
+        assert_eq!(config.retrier_interval, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn test_server_config_builder_batch_size() {
+        let config = ServerConfig::builder().batch_size(50).build();
+        assert_eq!(config.batch_size, 50);
+    }
+
+    #[test]
+    fn test_server_config_builder_shutdown_timeout() {
+        let config = ServerConfig::builder()
+            .shutdown_timeout(Duration::from_secs(60))
+            .build();
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_server_config_builder_fluent_chain() {
+        let config = ServerConfig::builder()
+            .api_addr_str("0.0.0.0:8080")
+            .unwrap()
+            .namespace("myapp")
+            .num_workers(8)
+            .fetch_timeout(Duration::from_secs(15))
+            .scheduler_interval(Duration::from_secs(2))
+            .retrier_interval(Duration::from_secs(2))
+            .batch_size(200)
+            .shutdown_timeout(Duration::from_secs(45))
+            .build();
+
+        assert_eq!(config.api_addr, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(config.namespace, "myapp");
+        assert_eq!(config.num_workers, 8);
+        assert_eq!(config.fetch_timeout, Duration::from_secs(15));
+        assert_eq!(config.scheduler_interval, Duration::from_secs(2));
+        assert_eq!(config.retrier_interval, Duration::from_secs(2));
+        assert_eq!(config.batch_size, 200);
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn test_server_config_clone() {
+        let config1 = ServerConfig::builder()
+            .namespace("clone_test")
+            .num_workers(2)
+            .build();
+        let config2 = config1.clone();
+
+        assert_eq!(config1.namespace, config2.namespace);
+        assert_eq!(config1.num_workers, config2.num_workers);
+    }
+
+    #[test]
+    fn test_server_config_debug() {
+        let config = ServerConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("ServerConfig"));
+        assert!(debug.contains("api_addr"));
+    }
+
+    #[test]
+    fn test_server_config_builder_debug() {
+        let builder = ServerConfigBuilder::new();
+        let debug = format!("{:?}", builder);
+        assert!(debug.contains("ServerConfigBuilder"));
+    }
+}

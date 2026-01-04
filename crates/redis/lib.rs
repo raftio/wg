@@ -298,4 +298,49 @@ mod tests {
         assert_eq!(keys.retry(), "myapp:retry");
         assert_eq!(keys.dead(), "myapp:dead");
     }
+
+    #[test]
+    fn test_redis_keys_namespace() {
+        let keys = RedisKeys::new("production");
+        assert_eq!(keys.namespace(), "production");
+    }
+
+    #[test]
+    fn test_redis_keys_with_string() {
+        let keys = RedisKeys::new(String::from("staging"));
+        assert_eq!(keys.namespace(), "staging");
+        assert_eq!(keys.jobs(), "staging:jobs");
+    }
+
+    #[test]
+    fn test_redis_keys_empty_namespace() {
+        let keys = RedisKeys::new("");
+        assert_eq!(keys.jobs(), ":jobs");
+        assert_eq!(keys.schedule(), ":schedule");
+    }
+
+    #[test]
+    fn test_redis_keys_complex_namespace() {
+        let keys = RedisKeys::new("app:v2:queue");
+        assert_eq!(keys.jobs(), "app:v2:queue:jobs");
+        assert_eq!(keys.schedule(), "app:v2:queue:schedule");
+        assert_eq!(keys.retry(), "app:v2:queue:retry");
+        assert_eq!(keys.dead(), "app:v2:queue:dead");
+    }
+
+    #[test]
+    fn test_redis_keys_clone() {
+        let keys1 = RedisKeys::new("test");
+        let keys2 = keys1.clone();
+        assert_eq!(keys1.jobs(), keys2.jobs());
+        assert_eq!(keys1.namespace(), keys2.namespace());
+    }
+
+    #[test]
+    fn test_redis_keys_debug() {
+        let keys = RedisKeys::new("debug_test");
+        let debug = format!("{:?}", keys);
+        assert!(debug.contains("RedisKeys"));
+        assert!(debug.contains("debug_test"));
+    }
 }
