@@ -40,6 +40,18 @@ pub struct WorkerConfig {
     pub batch_size: usize,
     /// Graceful shutdown timeout.
     pub shutdown_timeout: Duration,
+    /// Interval for heartbeat updates.
+    pub heartbeat_interval: Duration,
+    /// Interval for the reaper to check for dead workers.
+    pub reaper_interval: Duration,
+    /// Threshold for considering a worker pool stale (no heartbeat).
+    pub stale_threshold: Duration,
+    /// Optional custom pool ID (auto-generated if None).
+    pub pool_id: Option<String>,
+    /// Whether to enable the reaper for stale job recovery.
+    pub enable_reaper: bool,
+    /// Job type names this worker pool handles (for monitoring).
+    pub job_names: Vec<String>,
 }
 
 impl Default for WorkerConfig {
@@ -53,6 +65,12 @@ impl Default for WorkerConfig {
             retrier_interval: Duration::from_secs(1),
             batch_size: 100,
             shutdown_timeout: Duration::from_secs(30),
+            heartbeat_interval: Duration::from_secs(5),
+            reaper_interval: Duration::from_secs(30),
+            stale_threshold: Duration::from_secs(60),
+            pool_id: None,
+            enable_reaper: true,
+            job_names: Vec::new(),
         }
     }
 }
@@ -117,6 +135,42 @@ impl WorkerConfigBuilder {
         self
     }
 
+    /// Set the heartbeat interval.
+    pub fn heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.config.heartbeat_interval = interval;
+        self
+    }
+
+    /// Set the reaper interval.
+    pub fn reaper_interval(mut self, interval: Duration) -> Self {
+        self.config.reaper_interval = interval;
+        self
+    }
+
+    /// Set the stale threshold for detecting dead workers.
+    pub fn stale_threshold(mut self, threshold: Duration) -> Self {
+        self.config.stale_threshold = threshold;
+        self
+    }
+
+    /// Set a custom pool ID.
+    pub fn pool_id(mut self, id: impl Into<String>) -> Self {
+        self.config.pool_id = Some(id.into());
+        self
+    }
+
+    /// Enable or disable the reaper for stale job recovery.
+    pub fn enable_reaper(mut self, enable: bool) -> Self {
+        self.config.enable_reaper = enable;
+        self
+    }
+
+    /// Set the job type names this worker pool handles.
+    pub fn job_names(mut self, names: Vec<String>) -> Self {
+        self.config.job_names = names;
+        self
+    }
+
     /// Build the WorkerConfig.
     pub fn build(self) -> WorkerConfig {
         self.config
@@ -159,6 +213,12 @@ mod tests {
         assert_eq!(config.retrier_interval, Duration::from_secs(1));
         assert_eq!(config.batch_size, 100);
         assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
+        assert_eq!(config.reaper_interval, Duration::from_secs(30));
+        assert_eq!(config.stale_threshold, Duration::from_secs(60));
+        assert!(config.pool_id.is_none());
+        assert!(config.enable_reaper);
+        assert!(config.job_names.is_empty());
     }
 
     #[test]

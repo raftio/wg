@@ -2,7 +2,7 @@
 
 use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
-use wg_core::{Backend, SharedBackend};
+use wg_core::{Backend, SharedBackend, WorkerPoolInfo};
 
 /// Application state shared across handlers.
 pub struct AppState {
@@ -73,6 +73,50 @@ pub struct ApiResponse {
     pub message: String,
 }
 
+/// Response for listing worker pools.
+#[derive(Serialize)]
+pub struct WorkersResponse {
+    pub pools: Vec<WorkerPoolInfoResponse>,
+    pub total: usize,
+}
+
+/// Worker pool info for API response.
+#[derive(Serialize)]
+pub struct WorkerPoolInfoResponse {
+    pub pool_id: String,
+    pub heartbeat_at: i64,
+    pub started_at: i64,
+    pub concurrency: usize,
+    pub host: String,
+    pub pid: u32,
+    pub job_names: Vec<String>,
+    /// Uptime in seconds.
+    pub uptime_secs: i64,
+    /// Seconds since last heartbeat.
+    pub last_seen_secs: i64,
+}
+
+impl From<WorkerPoolInfo> for WorkerPoolInfoResponse {
+    fn from(info: WorkerPoolInfo) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        Self {
+            pool_id: info.pool_id,
+            heartbeat_at: info.heartbeat_at,
+            started_at: info.started_at,
+            concurrency: info.concurrency,
+            host: info.host,
+            pid: info.pid,
+            job_names: info.job_names,
+            uptime_secs: now - info.started_at,
+            last_seen_secs: now - info.heartbeat_at,
+        }
+    }
+}
+
 /// Configure API routes.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -81,6 +125,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(
                 web::scope("/api")
                     .route("/stats", web::get().to(stats))
+                    .route("/workers", web::get().to(list_workers))
                     .route("/jobs", web::post().to(enqueue))
                     .route("/dead", web::get().to(list_dead))
                     .route("/dead/{id}/retry", web::post().to(retry_dead))
@@ -109,6 +154,23 @@ async fn stats(state: web::Data<AppState>) -> impl Responder {
         retry,
         dead,
     })
+}
+
+/// List active worker pools.
+async fn list_workers(state: web::Data<AppState>) -> impl Responder {
+    let backend = &state.backend;
+
+    match backend.list_worker_pools().await {
+        Ok(pools) => {
+            let total = pools.len();
+            let pools: Vec<WorkerPoolInfoResponse> = pools.into_iter().map(|p| p.into()).collect();
+            HttpResponse::Ok().json(WorkersResponse { pools, total })
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list worker pools: {}", e),
+        }),
+    }
 }
 
 /// Enqueue a new job.
@@ -436,5 +498,57 @@ mod tests {
 
         assert_eq!(parsed["total"], 0);
         assert!(parsed["jobs"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_worker_pool_info_response_from() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let info = WorkerPoolInfo {
+            pool_id: "test-pool".to_string(),
+            heartbeat_at: now - 5,
+            started_at: now - 3600,
+            concurrency: 4,
+            host: "server-1".to_string(),
+            pid: 12345,
+            job_names: vec!["email".to_string(), "report".to_string()],
+        };
+
+        let response: WorkerPoolInfoResponse = info.into();
+
+        assert_eq!(response.pool_id, "test-pool");
+        assert_eq!(response.concurrency, 4);
+        assert_eq!(response.host, "server-1");
+        assert_eq!(response.pid, 12345);
+        assert_eq!(response.job_names.len(), 2);
+        assert!(response.uptime_secs >= 3600);
+        assert!(response.last_seen_secs >= 5);
+    }
+
+    #[test]
+    fn test_workers_response_serialization() {
+        let response = WorkersResponse {
+            pools: vec![WorkerPoolInfoResponse {
+                pool_id: "pool-1".to_string(),
+                heartbeat_at: 1704067200,
+                started_at: 1704063600,
+                concurrency: 8,
+                host: "host-1".to_string(),
+                pid: 1234,
+                job_names: vec!["task".to_string()],
+                uptime_secs: 3600,
+                last_seen_secs: 5,
+            }],
+            total: 1,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["total"], 1);
+        assert_eq!(parsed["pools"][0]["pool_id"], "pool-1");
+        assert_eq!(parsed["pools"][0]["concurrency"], 8);
     }
 }
