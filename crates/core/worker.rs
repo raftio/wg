@@ -167,11 +167,29 @@ where
         );
         tasks.spawn(async move { retrier.run().await });
 
+        // Register max concurrency for this job type (if enabled)
+        if self.config.max_concurrency > 0 {
+            if let Err(e) = backend
+                .set_job_concurrency(&self.config.job_name, self.config.max_concurrency)
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to set job concurrency in backend");
+            } else {
+                tracing::info!(
+                    job_name = %self.config.job_name,
+                    max_concurrency = self.config.max_concurrency,
+                    "Registered job concurrency limit"
+                );
+            }
+        }
+
         // Spawn workers
         for worker_id in 0..self.config.num_workers {
             let worker = Worker::new(
                 worker_id,
                 self.pool_id.clone(),
+                self.config.job_name.clone(),
+                self.config.max_concurrency,
                 backend.clone(),
                 self.handler.clone(),
                 self.config.fetch_timeout,
@@ -295,6 +313,24 @@ where
         self
     }
 
+    /// Set the job type name for this worker pool.
+    ///
+    /// This is used for concurrency control - workers will only acquire/release
+    /// concurrency slots for jobs matching this name.
+    pub fn job_name(mut self, name: impl Into<String>) -> Self {
+        self.config.job_name = name.into();
+        self
+    }
+
+    /// Set the maximum concurrent jobs of this type.
+    ///
+    /// This limit is coordinated across all worker pools processing the same job type.
+    /// Set to 0 (default) for unlimited concurrency.
+    pub fn max_concurrency(mut self, max: usize) -> Self {
+        self.config.max_concurrency = max;
+        self
+    }
+
     /// Set the job handler.
     pub fn handler(mut self, handler: F) -> Self {
         self.handler = Some(handler);
@@ -360,6 +396,9 @@ where
 {
     id: usize,
     pool_id: String,
+    #[allow(dead_code)] // Used for logging context; concurrency uses job.job_name
+    job_name: String,
+    max_concurrency: usize,
     backend: B,
     handler: F,
     fetch_timeout: std::time::Duration,
@@ -381,6 +420,8 @@ where
     fn new(
         id: usize,
         pool_id: String,
+        job_name: String,
+        max_concurrency: usize,
         backend: B,
         handler: F,
         fetch_timeout: std::time::Duration,
@@ -392,6 +433,8 @@ where
         Self {
             id,
             pool_id,
+            job_name,
+            max_concurrency,
             backend,
             handler,
             fetch_timeout,
@@ -448,6 +491,30 @@ where
             }
         };
 
+        // Try to acquire concurrency slot (if concurrency control is enabled)
+        let acquired_slot = if self.max_concurrency > 0 {
+            match self.backend.try_acquire_concurrency(&job.job_name).await {
+                Ok(true) => true,
+                Ok(false) => {
+                    // At capacity - push job back to front of queue and wait
+                    tracing::debug!(
+                        worker_id = self.id,
+                        job_name = %job.job_name,
+                        "Concurrency limit reached, re-queuing job"
+                    );
+                    self.backend.push_job_front(&job_json).await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    return Ok(false);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to acquire concurrency slot, proceeding anyway");
+                    false // Don't release a slot we didn't acquire
+                }
+            }
+        } else {
+            false // No concurrency control
+        };
+
         // Track in-progress (both locally and in backend for recovery)
         self.in_progress.fetch_add(1, Ordering::SeqCst);
         if let Err(e) = self
@@ -461,6 +528,7 @@ where
         tracing::debug!(
             worker_id = self.id,
             job_id = %job.id,
+            job_name = %job.job_name,
             "Processing job"
         );
 
@@ -511,6 +579,13 @@ where
                         "Job moved to dead queue"
                     );
                 }
+            }
+        }
+
+        // Release concurrency slot if we acquired one
+        if acquired_slot {
+            if let Err(e) = self.backend.release_concurrency(&job.job_name).await {
+                tracing::warn!(error = %e, "Failed to release concurrency slot");
             }
         }
 

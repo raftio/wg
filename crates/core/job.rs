@@ -115,6 +115,8 @@ pub enum JobStatus {
 pub struct Job<T> {
     /// Unique job identifier.
     pub id: JobId,
+    /// Job type name (used for concurrency control and routing).
+    pub job_name: String,
     /// The job payload.
     pub payload: T,
     /// Job options (retries, timeout, etc.).
@@ -133,10 +135,11 @@ impl<T> Job<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
 {
-    /// Create a new job with the given payload.
-    pub fn new(payload: T) -> Self {
+    /// Create a new job with the given job name and payload.
+    pub fn new(job_name: impl Into<String>, payload: T) -> Self {
         Self {
             id: JobId::new(),
+            job_name: job_name.into(),
             payload,
             options: JobOptions::default(),
             status: JobStatus::Pending,
@@ -147,9 +150,10 @@ where
     }
 
     /// Create a new job with custom options.
-    pub fn with_options(payload: T, options: JobOptions) -> Self {
+    pub fn with_options(job_name: impl Into<String>, payload: T, options: JobOptions) -> Self {
         Self {
             id: JobId::new(),
+            job_name: job_name.into(),
             payload,
             options,
             status: JobStatus::Pending,
@@ -226,21 +230,29 @@ mod tests {
 
     #[test]
     fn test_job_creation() {
-        let job = Job::new(TestPayload {
-            message: "hello".to_string(),
-        });
+        let job = Job::new(
+            "test_job",
+            TestPayload {
+                message: "hello".to_string(),
+            },
+        );
         assert_eq!(job.status, JobStatus::Pending);
         assert_eq!(job.options.max_retries, 3);
+        assert_eq!(job.job_name, "test_job");
     }
 
     #[test]
     fn test_job_serialization() {
-        let job = Job::new(TestPayload {
-            message: "test".to_string(),
-        });
+        let job = Job::new(
+            "test_job",
+            TestPayload {
+                message: "test".to_string(),
+            },
+        );
         let json = job.to_json().unwrap();
         let deserialized: Job<TestPayload> = Job::from_json(&json).unwrap();
         assert_eq!(deserialized.payload.message, "test");
+        assert_eq!(deserialized.job_name, "test_job");
     }
 
     #[test]
@@ -377,6 +389,7 @@ mod tests {
     fn test_job_with_options() {
         let options = JobOptions::with_max_retries(5).timeout(Duration::from_secs(60));
         let job = Job::with_options(
+            "custom_job",
             TestPayload {
                 message: "custom".to_string(),
             },
@@ -385,13 +398,17 @@ mod tests {
         assert_eq!(job.options.max_retries, 5);
         assert_eq!(job.options.timeout, Some(Duration::from_secs(60)));
         assert_eq!(job.status, JobStatus::Pending);
+        assert_eq!(job.job_name, "custom_job");
     }
 
     #[test]
     fn test_job_schedule_at() {
-        let job = Job::new(TestPayload {
-            message: "scheduled".to_string(),
-        });
+        let job = Job::new(
+            "scheduled_job",
+            TestPayload {
+                message: "scheduled".to_string(),
+            },
+        );
         let run_at = chrono_timestamp() + 3600; // 1 hour from now
         let scheduled_job = job.schedule_at(run_at);
 
@@ -402,9 +419,12 @@ mod tests {
     #[test]
     fn test_job_schedule_in() {
         let before = chrono_timestamp();
-        let job = Job::new(TestPayload {
-            message: "delayed".to_string(),
-        });
+        let job = Job::new(
+            "delayed_job",
+            TestPayload {
+                message: "delayed".to_string(),
+            },
+        );
         let scheduled_job = job.schedule_in(Duration::from_secs(3600));
         let after = chrono_timestamp();
 
@@ -418,9 +438,12 @@ mod tests {
     #[test]
     fn test_job_created_at_is_set() {
         let before = chrono_timestamp();
-        let job = Job::new(TestPayload {
-            message: "test".to_string(),
-        });
+        let job = Job::new(
+            "test_job",
+            TestPayload {
+                message: "test".to_string(),
+            },
+        );
         let after = chrono_timestamp();
 
         assert!(job.created_at >= before);
@@ -429,9 +452,12 @@ mod tests {
 
     #[test]
     fn test_job_initial_state() {
-        let job = Job::new(TestPayload {
-            message: "test".to_string(),
-        });
+        let job = Job::new(
+            "test_job",
+            TestPayload {
+                message: "test".to_string(),
+            },
+        );
         assert!(job.scheduled_at.is_none());
         assert!(job.last_error.is_none());
     }

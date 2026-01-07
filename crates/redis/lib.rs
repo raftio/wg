@@ -75,6 +75,16 @@ impl RedisKeys {
     pub fn in_progress(&self, pool_id: &str) -> String {
         format!("{}:in_progress:{}", self.namespace, pool_id)
     }
+
+    /// Key for a job type's max concurrency setting.
+    pub fn concurrency(&self, job_name: &str) -> String {
+        format!("{}:concurrency:{}", self.namespace, job_name)
+    }
+
+    /// Key for a job type's current in-flight count.
+    pub fn inflight(&self, job_name: &str) -> String {
+        format!("{}:inflight:{}", self.namespace, job_name)
+    }
 }
 
 /// Redis backend for job queue storage.
@@ -475,6 +485,80 @@ impl Backend for RedisBackend {
 
         Ok(jobs)
     }
+
+    // ========== Concurrency Control ==========
+
+    async fn set_job_concurrency(&self, job_name: &str, max: usize) -> Result<()> {
+        let mut conn = self.conn.clone();
+        let key = self.keys.concurrency(job_name);
+
+        conn.set::<_, _, ()>(&key, max)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn try_acquire_concurrency(&self, job_name: &str) -> Result<bool> {
+        let mut conn = self.conn.clone();
+        let max_key = self.keys.concurrency(job_name);
+        let inflight_key = self.keys.inflight(job_name);
+
+        // Lua script for atomic check-and-increment
+        let script = redis::Script::new(
+            r#"
+            local max = tonumber(redis.call('GET', KEYS[1]) or '0')
+            local current = tonumber(redis.call('GET', KEYS[2]) or '0')
+            if max == 0 or current < max then
+                redis.call('INCR', KEYS[2])
+                return 1
+            end
+            return 0
+            "#,
+        );
+
+        let result: i32 = script
+            .key(&max_key)
+            .key(&inflight_key)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
+
+        Ok(result == 1)
+    }
+
+    async fn release_concurrency(&self, job_name: &str) -> Result<()> {
+        let mut conn = self.conn.clone();
+        let inflight_key = self.keys.inflight(job_name);
+
+        // Decrement but don't go below 0
+        let script = redis::Script::new(
+            r#"
+            local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+            if current > 0 then
+                redis.call('DECR', KEYS[1])
+            end
+            return current
+            "#,
+        );
+
+        script
+            .key(&inflight_key)
+            .invoke_async::<i32>(&mut conn)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn push_job_front(&self, job_json: &str) -> Result<()> {
+        let mut conn = self.conn.clone();
+        // RPUSH puts at the end, but BRPOP pops from end,
+        // so RPUSH is like pushing to front for BRPOP
+        conn.rpush::<_, _, ()>(self.keys.jobs(), job_json)
+            .await
+            .map_err(|e| WgError::Backend(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -541,5 +625,183 @@ mod tests {
         assert_eq!(keys.worker_pools(), "myapp:worker_pools");
         assert_eq!(keys.heartbeat("pool-1"), "myapp:heartbeat:pool-1");
         assert_eq!(keys.in_progress("pool-1"), "myapp:in_progress:pool-1");
+    }
+
+    #[test]
+    fn test_redis_keys_concurrency() {
+        let keys = RedisKeys::new("myapp");
+        assert_eq!(keys.concurrency("send_email"), "myapp:concurrency:send_email");
+        assert_eq!(keys.inflight("send_email"), "myapp:inflight:send_email");
+    }
+}
+
+// ========== Integration Tests (require Redis) ==========
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+    }
+
+    fn test_namespace() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("wg_test_{}", ts)
+    }
+
+    async fn cleanup_redis(backend: &RedisBackend) {
+        while backend
+            .pop_job(Duration::from_secs(1))
+            .await
+            .unwrap()
+            .is_some()
+        {}
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running Redis server"]
+    async fn test_concurrency_set_and_acquire() {
+        let backend = RedisBackend::new(&redis_url(), &test_namespace())
+            .await
+            .expect("Failed to connect to Redis");
+
+        let job_name = "test_job";
+
+        // Set max concurrency to 3
+        backend.set_job_concurrency(job_name, 3).await.unwrap();
+
+        // Should acquire 3 times
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+
+        // 4th should fail
+        assert!(!backend.try_acquire_concurrency(job_name).await.unwrap());
+
+        // Cleanup
+        for _ in 0..3 {
+            backend.release_concurrency(job_name).await.ok();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running Redis server"]
+    async fn test_concurrency_release() {
+        let backend = RedisBackend::new(&redis_url(), &test_namespace())
+            .await
+            .expect("Failed to connect to Redis");
+
+        let job_name = "release_test";
+
+        backend.set_job_concurrency(job_name, 2).await.unwrap();
+
+        // Acquire 2
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(!backend.try_acquire_concurrency(job_name).await.unwrap());
+
+        // Release one
+        backend.release_concurrency(job_name).await.unwrap();
+
+        // Should acquire again
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+
+        // Cleanup
+        for _ in 0..2 {
+            backend.release_concurrency(job_name).await.ok();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running Redis server"]
+    async fn test_concurrency_unlimited() {
+        let backend = RedisBackend::new(&redis_url(), &test_namespace())
+            .await
+            .expect("Failed to connect to Redis");
+
+        let job_name = "unlimited";
+
+        // max=0 means unlimited
+        backend.set_job_concurrency(job_name, 0).await.unwrap();
+
+        for _ in 0..50 {
+            assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        }
+
+        // Cleanup
+        for _ in 0..50 {
+            backend.release_concurrency(job_name).await.ok();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running Redis server"]
+    async fn test_concurrent_acquire_atomicity() {
+        let backend = Arc::new(
+            RedisBackend::new(&redis_url(), &test_namespace())
+                .await
+                .expect("Failed to connect to Redis"),
+        );
+
+        let job_name = "atomic_test";
+        backend.set_job_concurrency(job_name, 5).await.unwrap();
+
+        // Spawn 20 concurrent tasks trying to acquire
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let backend = Arc::clone(&backend);
+            let job_name = job_name.to_string();
+            handles.push(tokio::spawn(async move {
+                backend.try_acquire_concurrency(&job_name).await.unwrap()
+            }));
+        }
+
+        let mut acquired = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                acquired += 1;
+            }
+        }
+
+        // Exactly 5 should have acquired (the limit)
+        assert_eq!(acquired, 5, "Expected exactly 5 acquires, got {}", acquired);
+
+        // Cleanup
+        for _ in 0..5 {
+            backend.release_concurrency(job_name).await.ok();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running Redis server"]
+    async fn test_push_job_front() {
+        let backend = RedisBackend::new(&redis_url(), &test_namespace())
+            .await
+            .expect("Failed to connect to Redis");
+
+        // Push normally
+        backend.push_job(r#"{"id":"job1"}"#).await.unwrap();
+        backend.push_job(r#"{"id":"job2"}"#).await.unwrap();
+
+        // Push to front
+        backend.push_job_front(r#"{"id":"urgent"}"#).await.unwrap();
+
+        // Pop should get urgent first (use 1s timeout, as_secs truncates ms)
+        let first = backend
+            .pop_job(Duration::from_secs(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.contains("urgent"), "Expected urgent, got: {}", first);
+
+        // Drain remaining
+        backend.pop_job(Duration::from_secs(1)).await.ok();
+        backend.pop_job(Duration::from_secs(1)).await.ok();
     }
 }

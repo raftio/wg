@@ -199,6 +199,22 @@ impl SqliteBackend {
         .await
         .ok();
 
+        // Create concurrency table for job-level concurrency control
+        let concurrency_table = format!("{}_concurrency", self.namespace);
+        sqlx::query(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {} (
+                job_name TEXT PRIMARY KEY,
+                max_concurrency INTEGER NOT NULL DEFAULT 0,
+                inflight INTEGER NOT NULL DEFAULT 0
+            )
+            "#,
+            concurrency_table
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to create concurrency table: {}", e)))?;
+
         Ok(())
     }
 
@@ -224,6 +240,10 @@ impl SqliteBackend {
 
     fn in_progress_table(&self) -> String {
         format!("{}_in_progress", self.namespace)
+    }
+
+    fn concurrency_table(&self) -> String {
+        format!("{}_concurrency", self.namespace)
     }
 }
 
@@ -600,6 +620,99 @@ impl Backend for SqliteBackend {
 
         Ok(jobs)
     }
+
+    // ========== Concurrency Control ==========
+
+    async fn set_job_concurrency(&self, job_name: &str, max: usize) -> Result<()> {
+        sqlx::query(&format!(
+            r#"
+            INSERT INTO {} (job_name, max_concurrency, inflight)
+            VALUES (?, ?, 0)
+            ON CONFLICT(job_name) DO UPDATE SET max_concurrency = excluded.max_concurrency
+            "#,
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .bind(max as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to set job concurrency: {}", e)))?;
+        Ok(())
+    }
+
+    async fn try_acquire_concurrency(&self, job_name: &str) -> Result<bool> {
+        // Use a single atomic update that only increments if under limit
+        // Returns the number of rows affected (1 if acquired, 0 if at limit)
+        let result = sqlx::query(&format!(
+            r#"
+            UPDATE {} 
+            SET inflight = inflight + 1 
+            WHERE job_name = ? AND (max_concurrency = 0 OR inflight < max_concurrency)
+            "#,
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to acquire concurrency: {}", e)))?;
+
+        if result.rows_affected() > 0 {
+            return Ok(true);
+        }
+
+        // Check if the job_name exists - if not, insert with inflight=1
+        let exists: Option<(i64,)> = sqlx::query_as(&format!(
+            "SELECT 1 FROM {} WHERE job_name = ?",
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to check concurrency: {}", e)))?;
+
+        if exists.is_none() {
+            // No concurrency limit set for this job type, insert with inflight=1 and max=0 (unlimited)
+            sqlx::query(&format!(
+                "INSERT OR IGNORE INTO {} (job_name, max_concurrency, inflight) VALUES (?, 0, 1)",
+                self.concurrency_table()
+            ))
+            .bind(job_name)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| WgError::Backend(format!("Failed to insert concurrency: {}", e)))?;
+            return Ok(true);
+        }
+
+        // Row exists but we couldn't acquire - at capacity
+        Ok(false)
+    }
+
+    async fn release_concurrency(&self, job_name: &str) -> Result<()> {
+        sqlx::query(&format!(
+            "UPDATE {} SET inflight = MAX(0, inflight - 1) WHERE job_name = ?",
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to release concurrency: {}", e)))?;
+        Ok(())
+    }
+
+    async fn push_job_front(&self, job_json: &str) -> Result<()> {
+        // For SQLite, we insert with a lower id to make it come first in FIFO
+        // Get the minimum id and insert with id-1, or just use negative ids
+        sqlx::query(&format!(
+            "INSERT INTO {} (id, job_json) VALUES ((SELECT COALESCE(MIN(id), 0) - 1 FROM {}), ?)",
+            self.jobs_table(),
+            self.jobs_table()
+        ))
+        .bind(job_json)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to push job to front: {}", e)))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -920,5 +1033,164 @@ mod tests {
         // Request only 2
         let due = backend.get_due_retries(now, 2).await.unwrap();
         assert_eq!(due.len(), 2);
+    }
+
+    // ========== Concurrency Control Tests ==========
+
+    #[tokio::test]
+    async fn test_concurrency_set_and_acquire() {
+        let backend = create_test_backend().await;
+        let job_name = "send_email";
+
+        // Set max concurrency to 3
+        backend.set_job_concurrency(job_name, 3).await.unwrap();
+
+        // Should acquire 3 times
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+
+        // 4th should fail
+        assert!(!backend.try_acquire_concurrency(job_name).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_release() {
+        let backend = create_test_backend().await;
+        let job_name = "process_order";
+
+        // Set max concurrency to 2
+        backend.set_job_concurrency(job_name, 2).await.unwrap();
+
+        // Acquire 2 slots
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+
+        // At limit
+        assert!(!backend.try_acquire_concurrency(job_name).await.unwrap());
+
+        // Release one
+        backend.release_concurrency(job_name).await.unwrap();
+
+        // Should acquire again
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+
+        // At limit again
+        assert!(!backend.try_acquire_concurrency(job_name).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_unlimited() {
+        let backend = create_test_backend().await;
+        let job_name = "unlimited_job";
+
+        // Set max=0 means unlimited
+        backend.set_job_concurrency(job_name, 0).await.unwrap();
+
+        // Should acquire many times
+        for _ in 0..100 {
+            assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_no_limit_set() {
+        let backend = create_test_backend().await;
+        let job_name = "new_job_type";
+
+        // No limit set - should still allow acquire (unlimited by default)
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_release_not_below_zero() {
+        let backend = create_test_backend().await;
+        let job_name = "safe_release";
+
+        backend.set_job_concurrency(job_name, 2).await.unwrap();
+
+        // Release without acquiring (should not go negative)
+        backend.release_concurrency(job_name).await.unwrap();
+        backend.release_concurrency(job_name).await.unwrap();
+        backend.release_concurrency(job_name).await.unwrap();
+
+        // Should still be able to acquire 2
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(!backend.try_acquire_concurrency(job_name).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_push_job_front() {
+        let backend = create_test_backend().await;
+
+        // Push jobs normally (back of queue)
+        backend.push_job(r#"{"id": "job1"}"#).await.unwrap();
+        backend.push_job(r#"{"id": "job2"}"#).await.unwrap();
+        backend.push_job(r#"{"id": "job3"}"#).await.unwrap();
+
+        // Push to front
+        backend.push_job_front(r#"{"id": "urgent"}"#).await.unwrap();
+
+        // Pop should get the front job first
+        let first = backend.pop_job(Duration::from_millis(100)).await.unwrap().unwrap();
+        assert!(first.contains("urgent"), "Expected 'urgent' first, got: {}", first);
+
+        // Then the rest in order
+        let second = backend.pop_job(Duration::from_millis(100)).await.unwrap().unwrap();
+        assert!(second.contains("job1"));
+    }
+
+    #[tokio::test]
+    async fn test_push_job_front_empty_queue() {
+        let backend = create_test_backend().await;
+
+        // Push to front of empty queue
+        backend.push_job_front(r#"{"id": "first"}"#).await.unwrap();
+        backend.push_job(r#"{"id": "second"}"#).await.unwrap();
+
+        let first = backend.pop_job(Duration::from_millis(100)).await.unwrap().unwrap();
+        assert!(first.contains("first"));
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_multiple_job_types() {
+        let backend = create_test_backend().await;
+
+        // Different job types have independent limits
+        backend.set_job_concurrency("type_a", 2).await.unwrap();
+        backend.set_job_concurrency("type_b", 3).await.unwrap();
+
+        // Acquire 2 for type_a
+        assert!(backend.try_acquire_concurrency("type_a").await.unwrap());
+        assert!(backend.try_acquire_concurrency("type_a").await.unwrap());
+        assert!(!backend.try_acquire_concurrency("type_a").await.unwrap());
+
+        // type_b should still work
+        assert!(backend.try_acquire_concurrency("type_b").await.unwrap());
+        assert!(backend.try_acquire_concurrency("type_b").await.unwrap());
+        assert!(backend.try_acquire_concurrency("type_b").await.unwrap());
+        assert!(!backend.try_acquire_concurrency("type_b").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_update_limit() {
+        let backend = create_test_backend().await;
+        let job_name = "dynamic_limit";
+
+        // Set initial limit
+        backend.set_job_concurrency(job_name, 1).await.unwrap();
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(!backend.try_acquire_concurrency(job_name).await.unwrap());
+
+        // Increase limit
+        backend.set_job_concurrency(job_name, 3).await.unwrap();
+
+        // Now should acquire more
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(backend.try_acquire_concurrency(job_name).await.unwrap());
+        assert!(!backend.try_acquire_concurrency(job_name).await.unwrap());
     }
 }

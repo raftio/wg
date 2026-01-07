@@ -28,24 +28,32 @@ impl<B: Backend + Clone> Client<B> {
         Self { backend }
     }
 
-    /// Enqueue a job for immediate processing.
+    /// Enqueue a job for immediate processing with a specific job name.
+    ///
+    /// The job_name is used for concurrency control - multiple worker pools
+    /// can coordinate to limit how many jobs of a specific type run concurrently.
     ///
     /// The job will be pushed to the jobs queue and processed as soon as
     /// a worker is available.
-    pub async fn enqueue<T>(&self, payload: T) -> Result<JobId>
+    pub async fn enqueue<T>(&self, job_name: &str, payload: T) -> Result<JobId>
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        let job = Job::new(payload);
+        let job = Job::new(job_name, payload);
         self.enqueue_job(job).await
     }
 
     /// Enqueue a job with custom options.
-    pub async fn enqueue_with_options<T>(&self, payload: T, options: JobOptions) -> Result<JobId>
+    pub async fn enqueue_with_options<T>(
+        &self,
+        job_name: &str,
+        payload: T,
+        options: JobOptions,
+    ) -> Result<JobId>
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        let job = Job::with_options(payload, options);
+        let job = Job::with_options(job_name, payload, options);
         self.enqueue_job(job).await
     }
 
@@ -67,17 +75,18 @@ impl<B: Backend + Clone> Client<B> {
     ///
     /// The job will be added to the schedule queue and moved to the jobs
     /// queue when the delay expires.
-    pub async fn schedule<T>(&self, payload: T, delay: Duration) -> Result<JobId>
+    pub async fn schedule<T>(&self, job_name: &str, payload: T, delay: Duration) -> Result<JobId>
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        let job = Job::new(payload).schedule_in(delay);
+        let job = Job::new(job_name, payload).schedule_in(delay);
         self.schedule_job(job).await
     }
 
     /// Schedule a job with custom options.
     pub async fn schedule_with_options<T>(
         &self,
+        job_name: &str,
         payload: T,
         delay: Duration,
         options: JobOptions,
@@ -85,16 +94,16 @@ impl<B: Backend + Clone> Client<B> {
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        let job = Job::with_options(payload, options).schedule_in(delay);
+        let job = Job::with_options(job_name, payload, options).schedule_in(delay);
         self.schedule_job(job).await
     }
 
     /// Schedule a job to run at a specific Unix timestamp.
-    pub async fn schedule_at<T>(&self, payload: T, run_at: i64) -> Result<JobId>
+    pub async fn schedule_at<T>(&self, job_name: &str, payload: T, run_at: i64) -> Result<JobId>
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        let job = Job::new(payload).schedule_at(run_at);
+        let job = Job::new(job_name, payload).schedule_at(run_at);
         self.schedule_job(job).await
     }
 

@@ -2446,6 +2446,7 @@ dependencies = [
  "async-trait",
  "redis",
  "serde_json",
+ "tokio",
  "tracing",
  "wg-core",
 ]

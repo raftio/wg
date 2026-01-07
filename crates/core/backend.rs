@@ -134,6 +134,31 @@ pub trait Backend: Send + Sync {
     /// This removes the heartbeat and returns all in-progress jobs so they
     /// can be re-enqueued.
     async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<String>>;
+
+    // ========== Concurrency Control ==========
+
+    /// Set the maximum concurrency for a job type.
+    ///
+    /// This stores the limit in the backend so all worker pools can coordinate.
+    /// Set to 0 for unlimited concurrency.
+    async fn set_job_concurrency(&self, job_name: &str, max: usize) -> Result<()>;
+
+    /// Try to acquire a concurrency slot for a job type.
+    ///
+    /// Returns `true` if a slot was acquired, `false` if at capacity.
+    /// This operation must be atomic to prevent race conditions.
+    async fn try_acquire_concurrency(&self, job_name: &str) -> Result<bool>;
+
+    /// Release a concurrency slot for a job type.
+    ///
+    /// Called when a job completes (success or failure) to free up a slot.
+    async fn release_concurrency(&self, job_name: &str) -> Result<()>;
+
+    /// Push a job to the front of the immediate processing queue.
+    ///
+    /// Used when a job couldn't acquire a concurrency slot and needs
+    /// to be re-queued for later processing.
+    async fn push_job_front(&self, job_json: &str) -> Result<()>;
 }
 
 /// A type-erased backend that can be shared across threads.
@@ -263,5 +288,21 @@ impl Backend for SharedBackend {
 
     async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<String>> {
         self.inner.cleanup_pool(pool_id).await
+    }
+
+    async fn set_job_concurrency(&self, job_name: &str, max: usize) -> Result<()> {
+        self.inner.set_job_concurrency(job_name, max).await
+    }
+
+    async fn try_acquire_concurrency(&self, job_name: &str) -> Result<bool> {
+        self.inner.try_acquire_concurrency(job_name).await
+    }
+
+    async fn release_concurrency(&self, job_name: &str) -> Result<()> {
+        self.inner.release_concurrency(job_name).await
+    }
+
+    async fn push_job_front(&self, job_json: &str) -> Result<()> {
+        self.inner.push_job_front(job_json).await
     }
 }

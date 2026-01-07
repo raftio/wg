@@ -111,7 +111,7 @@ async fn main() -> wg_core::Result<()> {
     ];
 
     for payment in payments {
-        let job_id = client.enqueue(payment.clone()).await?;
+        let job_id = client.enqueue("process_payment", payment.clone()).await?;
         println!("enqueued: {} ({})", job_id, payment.order_id);
     }
 
@@ -125,7 +125,7 @@ async fn main() -> wg_core::Result<()> {
     };
 
     let job_id = client
-        .schedule(delayed_payment, Duration::from_secs(5))
+        .schedule("process_payment", delayed_payment, Duration::from_secs(5))
         .await?;
     println!("scheduled: {} (runs in 5s)", job_id);
 
@@ -144,7 +144,7 @@ async fn main() -> wg_core::Result<()> {
     let options = JobOptions::with_max_retries(5).retry_delay(Duration::from_secs(3));
 
     let job_id = webhook_client
-        .enqueue_with_options(webhook, options)
+        .enqueue_with_options("send_webhook", webhook, options)
         .await?;
     println!("enqueued: {}", job_id);
 

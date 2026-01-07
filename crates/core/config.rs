@@ -28,6 +28,10 @@ pub struct WorkerConfig {
     pub url: String,
     /// Namespace prefix for keys/tables.
     pub namespace: String,
+    /// Job type name this worker pool processes (used for concurrency control).
+    pub job_name: String,
+    /// Maximum concurrent jobs of this type across all workers (0 = unlimited).
+    pub max_concurrency: usize,
     /// Number of worker tasks to spawn.
     pub num_workers: usize,
     /// Timeout for pop operations.
@@ -59,6 +63,8 @@ impl Default for WorkerConfig {
         Self {
             url: String::new(),
             namespace: "wg".to_string(),
+            job_name: "default".to_string(),
+            max_concurrency: 0, // 0 = unlimited
             num_workers: 4,
             fetch_timeout: Duration::from_secs(5),
             scheduler_interval: Duration::from_secs(1),
@@ -96,6 +102,20 @@ impl WorkerConfigBuilder {
     /// Set the namespace.
     pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
         self.config.namespace = namespace.into();
+        self
+    }
+
+    /// Set the job type name for this worker pool (used for concurrency control).
+    pub fn job_name(mut self, name: impl Into<String>) -> Self {
+        self.config.job_name = name.into();
+        self
+    }
+
+    /// Set the maximum concurrent jobs of this type (0 = unlimited).
+    ///
+    /// This limit is coordinated across all worker pools processing the same job type.
+    pub fn max_concurrency(mut self, max: usize) -> Self {
+        self.config.max_concurrency = max;
         self
     }
 
@@ -207,6 +227,8 @@ mod tests {
         let config = WorkerConfig::default();
         assert_eq!(config.url, "");
         assert_eq!(config.namespace, "wg");
+        assert_eq!(config.job_name, "default");
+        assert_eq!(config.max_concurrency, 0);
         assert_eq!(config.num_workers, 4);
         assert_eq!(config.fetch_timeout, Duration::from_secs(5));
         assert_eq!(config.scheduler_interval, Duration::from_secs(1));

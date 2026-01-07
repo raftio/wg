@@ -77,7 +77,7 @@ async fn main() -> wg_core::Result<()> {
     println!("Enqueueing {} jobs...\n", emails.len());
 
     for email in emails {
-        let job_id = client.enqueue(email).await?;
+        let job_id = client.enqueue("send_email", email).await?;
         println!("  enqueued: {}", job_id);
     }
 

@@ -160,6 +160,22 @@ impl MySqlBackend {
         .await
         .map_err(|e| WgError::Backend(format!("Failed to create in_progress table: {}", e)))?;
 
+        // Create concurrency table for job-level concurrency control
+        let concurrency_table = format!("{}_concurrency", self.namespace);
+        sqlx::query(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {} (
+                job_name VARCHAR(255) PRIMARY KEY,
+                max_concurrency INT NOT NULL DEFAULT 0,
+                inflight INT NOT NULL DEFAULT 0
+            )
+            "#,
+            concurrency_table
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to create concurrency table: {}", e)))?;
+
         Ok(())
     }
 
@@ -185,6 +201,10 @@ impl MySqlBackend {
 
     fn in_progress_table(&self) -> String {
         format!("{}_in_progress", self.namespace)
+    }
+
+    fn concurrency_table(&self) -> String {
+        format!("{}_concurrency", self.namespace)
     }
 }
 
@@ -575,5 +595,114 @@ impl Backend for MySqlBackend {
         self.remove_heartbeat(pool_id).await?;
 
         Ok(jobs)
+    }
+
+    // ========== Concurrency Control ==========
+
+    async fn set_job_concurrency(&self, job_name: &str, max: usize) -> Result<()> {
+        sqlx::query(&format!(
+            r#"
+            INSERT INTO {} (job_name, max_concurrency, inflight)
+            VALUES (?, ?, 0)
+            ON DUPLICATE KEY UPDATE max_concurrency = VALUES(max_concurrency)
+            "#,
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .bind(max as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to set job concurrency: {}", e)))?;
+        Ok(())
+    }
+
+    async fn try_acquire_concurrency(&self, job_name: &str) -> Result<bool> {
+        // Use a transaction to atomically check and increment
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| WgError::Backend(format!("Failed to begin transaction: {}", e)))?;
+
+        // Try to update if under limit
+        let result = sqlx::query(&format!(
+            r#"
+            UPDATE {} 
+            SET inflight = inflight + 1 
+            WHERE job_name = ? AND (max_concurrency = 0 OR inflight < max_concurrency)
+            "#,
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to acquire concurrency: {}", e)))?;
+
+        if result.rows_affected() > 0 {
+            tx.commit()
+                .await
+                .map_err(|e| WgError::Backend(format!("Failed to commit: {}", e)))?;
+            return Ok(true);
+        }
+
+        // Check if the job_name exists - if not, insert with inflight=1
+        let exists: Option<(i64,)> = sqlx::query_as(&format!(
+            "SELECT 1 FROM {} WHERE job_name = ?",
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to check concurrency: {}", e)))?;
+
+        if exists.is_none() {
+            // No concurrency limit set for this job type, insert with inflight=1 and max=0 (unlimited)
+            sqlx::query(&format!(
+                "INSERT IGNORE INTO {} (job_name, max_concurrency, inflight) VALUES (?, 0, 1)",
+                self.concurrency_table()
+            ))
+            .bind(job_name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| WgError::Backend(format!("Failed to insert concurrency: {}", e)))?;
+
+            tx.commit()
+                .await
+                .map_err(|e| WgError::Backend(format!("Failed to commit: {}", e)))?;
+            return Ok(true);
+        }
+
+        tx.rollback()
+            .await
+            .map_err(|e| WgError::Backend(format!("Failed to rollback: {}", e)))?;
+
+        // Row exists but we couldn't acquire - at capacity
+        Ok(false)
+    }
+
+    async fn release_concurrency(&self, job_name: &str) -> Result<()> {
+        sqlx::query(&format!(
+            "UPDATE {} SET inflight = GREATEST(0, inflight - 1) WHERE job_name = ?",
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to release concurrency: {}", e)))?;
+        Ok(())
+    }
+
+    async fn push_job_front(&self, job_json: &str) -> Result<()> {
+        // For MySQL, insert with a lower id to make it come first in FIFO
+        sqlx::query(&format!(
+            "INSERT INTO {} (id, job_json) VALUES ((SELECT COALESCE(MIN(t.id), 0) - 1 FROM (SELECT id FROM {}) t), ?)",
+            self.jobs_table(),
+            self.jobs_table()
+        ))
+        .bind(job_json)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to push job to front: {}", e)))?;
+        Ok(())
     }
 }
