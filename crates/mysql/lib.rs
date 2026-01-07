@@ -4,7 +4,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use wg_mysql::MySqlBackend;
 //! use wg_core::Client;
 //!
