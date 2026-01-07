@@ -58,14 +58,14 @@ async fn main() -> wg_core::Result<()> {
     let client = Client::new(backend);
     
     // Enqueue for immediate processing
-    client.enqueue(EmailJob {
+    client.enqueue("send_email", EmailJob {
         to: "user@example.com".into(),
         subject: "Hello".into(),
         body: "World".into(),
     }).await?;
     
     // Schedule for later
-    client.schedule(EmailJob {
+    client.schedule("send_email", EmailJob {
         to: "user@example.com".into(),
         subject: "Reminder".into(),
         body: "Don't forget!".into(),
@@ -130,7 +130,7 @@ let options = JobOptions::with_max_retries(5)
     .retry_delay(Duration::from_secs(30));
 
 // Enqueue with custom options
-client.enqueue_with_options(my_job, options).await?;
+client.enqueue_with_options("my_job", my_job, options).await?;
 ```
 
 ## Error Handling

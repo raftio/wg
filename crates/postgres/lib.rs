@@ -4,7 +4,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use wg_postgres::PostgresBackend;
 //! use wg_core::Client;
 //!
@@ -192,6 +192,22 @@ impl PostgresBackend {
         .await
         .ok();
 
+        // Create concurrency table for job-level concurrency control
+        let concurrency_table = format!("{}_concurrency", self.namespace);
+        sqlx::query(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {} (
+                job_name TEXT PRIMARY KEY,
+                max_concurrency INTEGER NOT NULL DEFAULT 0,
+                inflight INTEGER NOT NULL DEFAULT 0
+            )
+            "#,
+            concurrency_table
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to create concurrency table: {}", e)))?;
+
         Ok(())
     }
 
@@ -217,6 +233,10 @@ impl PostgresBackend {
 
     fn in_progress_table(&self) -> String {
         format!("{}_in_progress", self.namespace)
+    }
+
+    fn concurrency_table(&self) -> String {
+        format!("{}_concurrency", self.namespace)
     }
 }
 
@@ -590,5 +610,99 @@ impl Backend for PostgresBackend {
         self.remove_heartbeat(pool_id).await?;
 
         Ok(jobs)
+    }
+
+    // ========== Concurrency Control ==========
+
+    async fn set_job_concurrency(&self, job_name: &str, max: usize) -> Result<()> {
+        sqlx::query(&format!(
+            r#"
+            INSERT INTO {} (job_name, max_concurrency, inflight)
+            VALUES ($1, $2, 0)
+            ON CONFLICT (job_name) DO UPDATE SET max_concurrency = EXCLUDED.max_concurrency
+            "#,
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .bind(max as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to set job concurrency: {}", e)))?;
+        Ok(())
+    }
+
+    async fn try_acquire_concurrency(&self, job_name: &str) -> Result<bool> {
+        // Use a CTE to atomically check and increment
+        // Returns 1 row if acquired, 0 rows if at limit
+        let result: Option<(i64,)> = sqlx::query_as(&format!(
+            r#"
+            UPDATE {} 
+            SET inflight = inflight + 1 
+            WHERE job_name = $1 AND (max_concurrency = 0 OR inflight < max_concurrency)
+            RETURNING inflight
+            "#,
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to acquire concurrency: {}", e)))?;
+
+        if result.is_some() {
+            return Ok(true);
+        }
+
+        // Check if the job_name exists - if not, insert with inflight=1
+        let exists: Option<(i64,)> = sqlx::query_as(&format!(
+            "SELECT 1 FROM {} WHERE job_name = $1",
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to check concurrency: {}", e)))?;
+
+        if exists.is_none() {
+            // No concurrency limit set for this job type, insert with inflight=1 and max=0 (unlimited)
+            sqlx::query(&format!(
+                "INSERT INTO {} (job_name, max_concurrency, inflight) VALUES ($1, 0, 1) ON CONFLICT DO NOTHING",
+                self.concurrency_table()
+            ))
+            .bind(job_name)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| WgError::Backend(format!("Failed to insert concurrency: {}", e)))?;
+            return Ok(true);
+        }
+
+        // Row exists but we couldn't acquire - at capacity
+        Ok(false)
+    }
+
+    async fn release_concurrency(&self, job_name: &str) -> Result<()> {
+        sqlx::query(&format!(
+            "UPDATE {} SET inflight = GREATEST(0, inflight - 1) WHERE job_name = $1",
+            self.concurrency_table()
+        ))
+        .bind(job_name)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to release concurrency: {}", e)))?;
+        Ok(())
+    }
+
+    async fn push_job_front(&self, job_json: &str) -> Result<()> {
+        // For PostgreSQL, we insert with a lower id by using a sequence manipulation
+        // or simply insert and update the id. Simpler: use negative ids
+        sqlx::query(&format!(
+            "INSERT INTO {} (id, job_json) VALUES ((SELECT COALESCE(MIN(id), 0) - 1 FROM {}), $1)",
+            self.jobs_table(),
+            self.jobs_table()
+        ))
+        .bind(job_json)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to push job to front: {}", e)))?;
+        Ok(())
     }
 }
