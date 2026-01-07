@@ -2402,6 +2402,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wg-client"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "wg-core",
+]
+
+[[package]]
 name = "wg-core"
 version = "0.1.0"
 dependencies = [

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/client",
     "crates/redis",
     "crates/postgres",
     "crates/mysql",
@@ -35,5 +36,6 @@ sqlx = { version = "0.8", features = ["runtime-tokio"] }
 
 # Internal crates
 wg-core = { path = "crates/core" }
+wg-client = { path = "crates/client" }
 wg-redis = { path = "crates/redis" }
 wg-sqlite = { path = "crates/sqlite" }
