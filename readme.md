@@ -17,6 +17,7 @@ A Rust library for background job processing with multiple storage backends.
 | Crate | Description |
 |-------|-------------|
 | `wg-core` | Core types, traits, Client, WorkerPool |
+| `wg-client` | Admin SDK for queue management and monitoring |
 | `wg-redis` | Redis backend (recommended for production) |
 | `wg-postgres` | PostgreSQL backend |
 | `wg-mysql` | MySQL backend |
@@ -29,7 +30,8 @@ Add the crates you need to your `Cargo.toml`:
 ```toml
 [dependencies]
 wg-core = "0.1"
-wg-redis = "0.1"  # or wg-postgres, wg-mysql, wg-sqlite
+wg-client = "0.1"  # optional: for queue management/monitoring
+wg-redis = "0.1"   # or wg-postgres, wg-mysql, wg-sqlite
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 ```
@@ -107,6 +109,42 @@ async fn main() -> wg_core::Result<()> {
         .build()?;
     
     pool.run().await?;
+    Ok(())
+}
+```
+
+## Admin Client (Queue Management)
+
+```rust
+use wg_client::AdminClient;
+use wg_redis::RedisBackend;
+
+#[tokio::main]
+async fn main() -> wg_core::Result<()> {
+    let backend = RedisBackend::new("redis://localhost", "myapp").await?;
+    let admin = AdminClient::new(backend);
+    
+    // Get queue statistics
+    let stats = admin.stats().await?;
+    println!("Queue: {}, Scheduled: {}, Retry: {}, Dead: {}", 
+        stats.queue, stats.scheduled, stats.retry, stats.dead);
+    
+    // List worker pools
+    let workers = admin.list_workers().await?;
+    for w in workers {
+        println!("Pool {} on {}: {} workers", w.pool_id, w.host, w.concurrency);
+    }
+    
+    // List and retry dead jobs
+    let dead_jobs = admin.list_dead(10, 0).await?;
+    for job in dead_jobs {
+        println!("Dead job {}: {}", job.id, job.last_error.unwrap_or_default());
+        admin.retry_dead(&job.id).await?;
+    }
+    
+    // Unlock stuck in-progress jobs
+    admin.unlock_job("pool-id", &job_json).await?;
+    
     Ok(())
 }
 ```

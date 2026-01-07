@@ -1,0 +1,16 @@
+[package]
+name = "wg-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SDK client for wg job queue management"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+wg-core = { path = "../core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
