@@ -92,6 +92,7 @@ async fn main() -> wg_core::Result<()> {
         .handler(process_email)
         .fetch_timeout(Duration::from_secs(2))
         .shutdown_timeout(Duration::from_secs(5))
+        .max_concurrency(2)
         .build()?;
 
     pool.run().await?;

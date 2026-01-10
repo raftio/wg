@@ -21,6 +21,9 @@ use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::time::Duration;
 use wg_core::{Backend, Result, WgError, WorkerPoolInfo};
 
+/// Table prefix for all wg-created tables.
+const WG_TABLE_PREFIX: &str = "_wg_tb_";
+
 /// SQLite backend for job queue storage.
 #[derive(Clone)]
 pub struct SqliteBackend {
@@ -57,10 +60,10 @@ impl SqliteBackend {
 
     /// Initialize the required tables.
     async fn init_tables(&self) -> Result<()> {
-        let jobs_table = format!("{}_jobs", self.namespace);
-        let scheduled_table = format!("{}_scheduled", self.namespace);
-        let retry_table = format!("{}_retry", self.namespace);
-        let dead_table = format!("{}_dead", self.namespace);
+        let jobs_table = format!("{}{}_jobs", WG_TABLE_PREFIX, self.namespace);
+        let scheduled_table = format!("{}{}_scheduled", WG_TABLE_PREFIX, self.namespace);
+        let retry_table = format!("{}{}_retry", WG_TABLE_PREFIX, self.namespace);
+        let dead_table = format!("{}{}_dead", WG_TABLE_PREFIX, self.namespace);
 
         // Create jobs table (FIFO queue)
         sqlx::query(&format!(
@@ -143,7 +146,7 @@ impl SqliteBackend {
         .map_err(|e| WgError::Backend(format!("Failed to create dead table: {}", e)))?;
 
         // Create worker pools table for heartbeat monitoring
-        let worker_pools_table = format!("{}_worker_pools", self.namespace);
+        let worker_pools_table = format!("{}{}_worker_pools", WG_TABLE_PREFIX, self.namespace);
         sqlx::query(&format!(
             r#"
             CREATE TABLE IF NOT EXISTS {} (
@@ -173,7 +176,7 @@ impl SqliteBackend {
         .ok();
 
         // Create in_progress table for tracking jobs being processed
-        let in_progress_table = format!("{}_in_progress", self.namespace);
+        let in_progress_table = format!("{}{}_in_progress", WG_TABLE_PREFIX, self.namespace);
         sqlx::query(&format!(
             r#"
             CREATE TABLE IF NOT EXISTS {} (
@@ -200,7 +203,7 @@ impl SqliteBackend {
         .ok();
 
         // Create concurrency table for job-level concurrency control
-        let concurrency_table = format!("{}_concurrency", self.namespace);
+        let concurrency_table = format!("{}{}_concurrency", WG_TABLE_PREFIX, self.namespace);
         sqlx::query(&format!(
             r#"
             CREATE TABLE IF NOT EXISTS {} (
@@ -219,31 +222,31 @@ impl SqliteBackend {
     }
 
     fn jobs_table(&self) -> String {
-        format!("{}_jobs", self.namespace)
+        format!("{}{}_jobs", WG_TABLE_PREFIX, self.namespace)
     }
 
     fn scheduled_table(&self) -> String {
-        format!("{}_scheduled", self.namespace)
+        format!("{}{}_scheduled", WG_TABLE_PREFIX, self.namespace)
     }
 
     fn retry_table(&self) -> String {
-        format!("{}_retry", self.namespace)
+        format!("{}{}_retry", WG_TABLE_PREFIX, self.namespace)
     }
 
     fn dead_table(&self) -> String {
-        format!("{}_dead", self.namespace)
+        format!("{}{}_dead", WG_TABLE_PREFIX, self.namespace)
     }
 
     fn worker_pools_table(&self) -> String {
-        format!("{}_worker_pools", self.namespace)
+        format!("{}{}_worker_pools", WG_TABLE_PREFIX, self.namespace)
     }
 
     fn in_progress_table(&self) -> String {
-        format!("{}_in_progress", self.namespace)
+        format!("{}{}_in_progress", WG_TABLE_PREFIX, self.namespace)
     }
 
     fn concurrency_table(&self) -> String {
-        format!("{}_concurrency", self.namespace)
+        format!("{}{}_concurrency", WG_TABLE_PREFIX, self.namespace)
     }
 }
 

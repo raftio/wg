@@ -28,6 +28,9 @@ pub struct RedisKeys {
     namespace: String,
 }
 
+/// Table prefix for all wg-created keys.
+const WG_TABLE_PREFIX: &str = "_wg_tb_";
+
 impl RedisKeys {
     /// Create a new RedisKeys instance with the given namespace.
     pub fn new(namespace: impl Into<String>) -> Self {
@@ -43,47 +46,47 @@ impl RedisKeys {
 
     /// Key for the main jobs queue (LIST).
     pub fn jobs(&self) -> String {
-        format!("{}:jobs", self.namespace)
+        format!("{}{}:jobs", WG_TABLE_PREFIX, self.namespace)
     }
 
     /// Key for the scheduled jobs sorted set (ZSET).
     pub fn schedule(&self) -> String {
-        format!("{}:schedule", self.namespace)
+        format!("{}{}:schedule", WG_TABLE_PREFIX, self.namespace)
     }
 
     /// Key for the retry queue sorted set (ZSET).
     pub fn retry(&self) -> String {
-        format!("{}:retry", self.namespace)
+        format!("{}{}:retry", WG_TABLE_PREFIX, self.namespace)
     }
 
     /// Key for the dead letter queue (LIST).
     pub fn dead(&self) -> String {
-        format!("{}:dead", self.namespace)
+        format!("{}{}:dead", WG_TABLE_PREFIX, self.namespace)
     }
 
     /// Key for the set of registered worker pools (SET).
     pub fn worker_pools(&self) -> String {
-        format!("{}:worker_pools", self.namespace)
+        format!("{}{}:worker_pools", WG_TABLE_PREFIX, self.namespace)
     }
 
     /// Key for a worker pool's heartbeat data (HASH).
     pub fn heartbeat(&self, pool_id: &str) -> String {
-        format!("{}:heartbeat:{}", self.namespace, pool_id)
+        format!("{}{}:heartbeat:{}", WG_TABLE_PREFIX, self.namespace, pool_id)
     }
 
     /// Key for a worker pool's in-progress jobs (ZSET, scored by timestamp).
     pub fn in_progress(&self, pool_id: &str) -> String {
-        format!("{}:in_progress:{}", self.namespace, pool_id)
+        format!("{}{}:in_progress:{}", WG_TABLE_PREFIX, self.namespace, pool_id)
     }
 
     /// Key for a job type's max concurrency setting.
     pub fn concurrency(&self, job_name: &str) -> String {
-        format!("{}:concurrency:{}", self.namespace, job_name)
+        format!("{}{}:concurrency:{}", WG_TABLE_PREFIX, self.namespace, job_name)
     }
 
     /// Key for a job type's current in-flight count.
     pub fn inflight(&self, job_name: &str) -> String {
-        format!("{}:inflight:{}", self.namespace, job_name)
+        format!("{}{}:inflight:{}", WG_TABLE_PREFIX, self.namespace, job_name)
     }
 }
 
@@ -568,10 +571,10 @@ mod tests {
     #[test]
     fn test_redis_keys() {
         let keys = RedisKeys::new("myapp");
-        assert_eq!(keys.jobs(), "myapp:jobs");
-        assert_eq!(keys.schedule(), "myapp:schedule");
-        assert_eq!(keys.retry(), "myapp:retry");
-        assert_eq!(keys.dead(), "myapp:dead");
+        assert_eq!(keys.jobs(), "_wg_tb_myapp:jobs");
+        assert_eq!(keys.schedule(), "_wg_tb_myapp:schedule");
+        assert_eq!(keys.retry(), "_wg_tb_myapp:retry");
+        assert_eq!(keys.dead(), "_wg_tb_myapp:dead");
     }
 
     #[test]
@@ -584,23 +587,23 @@ mod tests {
     fn test_redis_keys_with_string() {
         let keys = RedisKeys::new(String::from("staging"));
         assert_eq!(keys.namespace(), "staging");
-        assert_eq!(keys.jobs(), "staging:jobs");
+        assert_eq!(keys.jobs(), "_wg_tb_staging:jobs");
     }
 
     #[test]
     fn test_redis_keys_empty_namespace() {
         let keys = RedisKeys::new("");
-        assert_eq!(keys.jobs(), ":jobs");
-        assert_eq!(keys.schedule(), ":schedule");
+        assert_eq!(keys.jobs(), "_wg_tb_:jobs");
+        assert_eq!(keys.schedule(), "_wg_tb_:schedule");
     }
 
     #[test]
     fn test_redis_keys_complex_namespace() {
         let keys = RedisKeys::new("app:v2:queue");
-        assert_eq!(keys.jobs(), "app:v2:queue:jobs");
-        assert_eq!(keys.schedule(), "app:v2:queue:schedule");
-        assert_eq!(keys.retry(), "app:v2:queue:retry");
-        assert_eq!(keys.dead(), "app:v2:queue:dead");
+        assert_eq!(keys.jobs(), "_wg_tb_app:v2:queue:jobs");
+        assert_eq!(keys.schedule(), "_wg_tb_app:v2:queue:schedule");
+        assert_eq!(keys.retry(), "_wg_tb_app:v2:queue:retry");
+        assert_eq!(keys.dead(), "_wg_tb_app:v2:queue:dead");
     }
 
     #[test]
@@ -622,16 +625,16 @@ mod tests {
     #[test]
     fn test_redis_keys_heartbeat() {
         let keys = RedisKeys::new("myapp");
-        assert_eq!(keys.worker_pools(), "myapp:worker_pools");
-        assert_eq!(keys.heartbeat("pool-1"), "myapp:heartbeat:pool-1");
-        assert_eq!(keys.in_progress("pool-1"), "myapp:in_progress:pool-1");
+        assert_eq!(keys.worker_pools(), "_wg_tb_myapp:worker_pools");
+        assert_eq!(keys.heartbeat("pool-1"), "_wg_tb_myapp:heartbeat:pool-1");
+        assert_eq!(keys.in_progress("pool-1"), "_wg_tb_myapp:in_progress:pool-1");
     }
 
     #[test]
     fn test_redis_keys_concurrency() {
         let keys = RedisKeys::new("myapp");
-        assert_eq!(keys.concurrency("send_email"), "myapp:concurrency:send_email");
-        assert_eq!(keys.inflight("send_email"), "myapp:inflight:send_email");
+        assert_eq!(keys.concurrency("send_email"), "_wg_tb_myapp:concurrency:send_email");
+        assert_eq!(keys.inflight("send_email"), "_wg_tb_myapp:inflight:send_email");
     }
 }
 
