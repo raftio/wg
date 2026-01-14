@@ -155,4 +155,63 @@ impl<B: Backend + Clone> Client<B> {
     pub async fn dead_len(&self) -> Result<usize> {
         self.backend.dead_len(&self.namespace).await
     }
+
+    /// List all namespaces that have any data in the backend.
+    ///
+    /// This is useful for admin/monitoring tools to discover all active namespaces.
+    pub async fn list_namespaces(&self) -> Result<Vec<String>> {
+        self.backend.list_namespaces().await
+    }
+
+    /// Get statistics for the current namespace.
+    pub async fn stats(&self) -> Result<NamespaceStats> {
+        Ok(NamespaceStats {
+            namespace: self.namespace.clone(),
+            queue_len: self.queue_len().await?,
+            schedule_len: self.schedule_len().await?,
+            retry_len: self.retry_len().await?,
+            dead_len: self.dead_len().await?,
+        })
+    }
+
+    /// Get statistics for all namespaces.
+    ///
+    /// Returns stats for every namespace that has data in the backend.
+    pub async fn all_stats(&self) -> Result<Vec<NamespaceStats>> {
+        let namespaces = self.list_namespaces().await?;
+        let mut all_stats = Vec::with_capacity(namespaces.len());
+
+        for ns in namespaces {
+            let stats = NamespaceStats {
+                namespace: ns.clone(),
+                queue_len: self.backend.queue_len(&ns).await?,
+                schedule_len: self.backend.schedule_len(&ns).await?,
+                retry_len: self.backend.retry_len(&ns).await?,
+                dead_len: self.backend.dead_len(&ns).await?,
+            };
+            all_stats.push(stats);
+        }
+
+        Ok(all_stats)
+    }
+
+    /// Get a reference to the underlying backend.
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+}
+
+/// Statistics for a namespace.
+#[derive(Debug, Clone)]
+pub struct NamespaceStats {
+    /// The namespace name.
+    pub namespace: String,
+    /// Number of jobs in the immediate queue.
+    pub queue_len: usize,
+    /// Number of jobs in the schedule queue.
+    pub schedule_len: usize,
+    /// Number of jobs in the retry queue.
+    pub retry_len: usize,
+    /// Number of jobs in the dead letter queue.
+    pub dead_len: usize,
 }

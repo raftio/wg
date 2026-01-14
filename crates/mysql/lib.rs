@@ -640,6 +640,48 @@ impl Backend for MySqlBackend {
         Ok(jobs)
     }
 
+    // ========== Namespace Discovery ==========
+
+    async fn list_namespaces(&self) -> Result<Vec<String>> {
+        // Query information_schema to find all tables with our prefix
+        let pattern = format!("{}%", WG_TABLE_PREFIX);
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE ?"
+        )
+        .bind(&pattern)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to list namespaces: {}", e)))?;
+
+        let mut namespaces = std::collections::HashSet::new();
+        let prefix_len = WG_TABLE_PREFIX.len();
+
+        for (table_name,) in rows {
+            // Tables are like: _wg_tb_{namespace}_jobs, _wg_tb_{namespace}_scheduled, etc.
+            // Skip global tables like _wg_tb_worker_pools
+            if let Some(rest) = table_name.get(prefix_len..) {
+                // Skip global table
+                if rest == "worker_pools" {
+                    continue;
+                }
+                // Extract namespace from pattern like "namespace_jobs"
+                // Find the last underscore that separates namespace from table type
+                for suffix in ["_jobs", "_scheduled", "_retry", "_dead", "_in_progress", "_concurrency"] {
+                    if let Some(ns) = rest.strip_suffix(suffix) {
+                        if !ns.is_empty() {
+                            namespaces.insert(ns.to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut result: Vec<String> = namespaces.into_iter().collect();
+        result.sort();
+        Ok(result)
+    }
+
     // ========== Concurrency Control ==========
 
     async fn set_job_concurrency(&self, ns: &str, job_name: &str, max: usize) -> Result<()> {

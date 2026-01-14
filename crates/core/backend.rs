@@ -154,6 +154,13 @@ pub trait Backend: Send + Sync {
     /// can be re-enqueued. Returns Vec<(namespace, job_json)>.
     async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<(String, String)>>;
 
+    // ========== Namespace Discovery ==========
+
+    /// List all namespaces that have any data (jobs in any queue).
+    ///
+    /// This is useful for admin/monitoring tools to discover all active namespaces.
+    async fn list_namespaces(&self) -> Result<Vec<String>>;
+
     // ========== Concurrency Control ==========
 
     /// Set the maximum concurrency for a job type in a namespace.
@@ -305,6 +312,10 @@ impl Backend for SharedBackend {
 
     async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<(String, String)>> {
         self.inner.cleanup_pool(pool_id).await
+    }
+
+    async fn list_namespaces(&self) -> Result<Vec<String>> {
+        self.inner.list_namespaces().await
     }
 
     async fn set_job_concurrency(&self, ns: &str, job_name: &str, max: usize) -> Result<()> {

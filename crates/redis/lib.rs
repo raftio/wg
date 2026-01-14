@@ -531,6 +531,57 @@ impl Backend for RedisBackend {
         Ok(jobs)
     }
 
+    // ========== Namespace Discovery ==========
+
+    async fn list_namespaces(&self) -> Result<Vec<String>> {
+        let mut conn = self.conn.clone();
+        let mut namespaces = std::collections::HashSet::new();
+
+        // Scan for all keys matching our prefix pattern
+        let pattern = format!("{}*", WG_TABLE_PREFIX);
+        let mut cursor: u64 = 0;
+
+        loop {
+            let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(1000)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| WgError::Backend(e.to_string()))?;
+
+            for key in keys {
+                // Keys are like: _wg_tb_{namespace}:jobs, _wg_tb_{namespace}:schedule, etc.
+                // Skip global keys like _wg_tb_worker_pools, _wg_tb_heartbeat:*
+                if let Some(rest) = key.strip_prefix(WG_TABLE_PREFIX) {
+                    // Skip global keys
+                    if rest.starts_with("worker_pools")
+                        || rest.starts_with("heartbeat:")
+                    {
+                        continue;
+                    }
+                    // Extract namespace from pattern like "namespace:jobs"
+                    if let Some(ns) = rest.split(':').next() {
+                        if !ns.is_empty() {
+                            namespaces.insert(ns.to_string());
+                        }
+                    }
+                }
+            }
+
+            cursor = new_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+
+        let mut result: Vec<String> = namespaces.into_iter().collect();
+        result.sort();
+        Ok(result)
+    }
+
     // ========== Concurrency Control ==========
 
     async fn set_job_concurrency(&self, ns: &str, job_name: &str, max: usize) -> Result<()> {
