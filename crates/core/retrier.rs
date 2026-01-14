@@ -11,6 +11,7 @@ use crate::error::Result;
 /// Retrier that moves jobs from the retry queue back to the jobs queue.
 pub struct Retrier<B: Backend> {
     backend: B,
+    namespace: String,
     interval: Duration,
     batch_size: usize,
     running: Arc<AtomicBool>,
@@ -20,12 +21,14 @@ impl<B: Backend> Retrier<B> {
     /// Create a new Retrier.
     pub fn new(
         backend: B,
+        namespace: impl Into<String>,
         interval: Duration,
         batch_size: usize,
         running: Arc<AtomicBool>,
     ) -> Self {
         Self {
             backend,
+            namespace: namespace.into(),
             interval,
             batch_size,
             running,
@@ -37,7 +40,7 @@ impl<B: Backend> Retrier<B> {
     /// This will continuously check the retry queue and move jobs
     /// whose retry time has passed back to the jobs queue.
     pub async fn run(&self) -> Result<()> {
-        tracing::info!("Retrier started");
+        tracing::info!(namespace = %self.namespace, "Retrier started");
 
         while self.running.load(Ordering::SeqCst) {
             if let Err(e) = self.tick().await {
@@ -47,7 +50,7 @@ impl<B: Backend> Retrier<B> {
             time::sleep(self.interval).await;
         }
 
-        tracing::info!("Retrier stopped");
+        tracing::info!(namespace = %self.namespace, "Retrier stopped");
         Ok(())
     }
 
@@ -56,16 +59,21 @@ impl<B: Backend> Retrier<B> {
         let now = current_timestamp();
 
         // Get jobs that are due for retry
-        let jobs = self.backend.get_due_retries(now, self.batch_size).await?;
+        let jobs = self
+            .backend
+            .get_due_retries(&self.namespace, now, self.batch_size)
+            .await?;
 
         if jobs.is_empty() {
             return Ok(());
         }
 
-        tracing::debug!(count = jobs.len(), "Moving retry jobs to queue");
+        tracing::debug!(count = jobs.len(), namespace = %self.namespace, "Moving retry jobs to queue");
 
         for job_json in jobs {
-            self.backend.move_retry_to_queue(&job_json).await?;
+            self.backend
+                .move_retry_to_queue(&self.namespace, &job_json)
+                .await?;
         }
 
         Ok(())

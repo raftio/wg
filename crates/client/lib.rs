@@ -17,19 +17,28 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> wg_core::Result<()> {
-//!     let backend = SqliteBackend::new("jobs.db", "myapp").await?;
+//!     let backend = SqliteBackend::new("jobs.db").await?;
 //!     let admin = AdminClient::new(backend);
 //!
-//!     // Get queue statistics
-//!     let stats = admin.stats().await?;
+//!     // List all namespaces
+//!     let namespaces = admin.list_namespaces().await?;
+//!
+//!     // Get queue statistics for all namespaces
+//!     let all_stats = admin.all_stats().await?;
+//!     for stats in all_stats {
+//!         println!("{}: queue={}, dead={}", stats.namespace, stats.queue, stats.dead);
+//!     }
+//!
+//!     // Get stats for a specific namespace
+//!     let stats = admin.stats("myapp").await?;
 //!     println!("Queue: {}, Dead: {}", stats.queue, stats.dead);
 //!
 //!     // List worker pools
 //!     let workers = admin.list_workers().await?;
 //!     println!("Active workers: {}", workers.len());
 //!
-//!     // Retry a dead job
-//!     admin.retry_dead("job-id-123").await?;
+//!     // Retry a dead job in a specific namespace
+//!     admin.retry_dead("myapp", "job-id-123").await?;
 //!
 //!     Ok(())
 //! }
@@ -40,9 +49,24 @@ use wg_core::{Backend, SharedBackend, WorkerPoolInfo};
 
 pub use wg_core::{Job, JobId, JobOptions, JobStatus, Result, WgError};
 
-/// Queue statistics.
+/// Queue statistics for a single namespace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueStats {
+    /// Number of jobs in the immediate queue.
+    pub queue: usize,
+    /// Number of jobs scheduled for future execution.
+    pub scheduled: usize,
+    /// Number of jobs waiting for retry.
+    pub retry: usize,
+    /// Number of dead (failed) jobs.
+    pub dead: usize,
+}
+
+/// Queue statistics with namespace info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamespaceQueueStats {
+    /// The namespace name.
+    pub namespace: String,
     /// Number of jobs in the immediate queue.
     pub queue: usize,
     /// Number of jobs scheduled for future execution.
@@ -70,10 +94,11 @@ pub struct DeadJob {
     pub retry_count: u32,
 }
 
-/// Admin client for managing and monitoring the job queue.
+/// Admin client for managing and monitoring the job queue across all namespaces.
 ///
 /// This client provides methods for:
-/// - Getting queue statistics
+/// - Listing all namespaces
+/// - Getting queue statistics (per-namespace or all)
 /// - Listing and managing worker pools
 /// - Managing dead jobs (retry, delete)
 /// - Canceling scheduled or retry jobs
@@ -98,15 +123,56 @@ impl<B: Backend + Clone> AdminClient<B> {
         Self { backend }
     }
 
+    /// Get a reference to the underlying backend.
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    // ========== Namespace Discovery ==========
+
+    /// List all namespaces that have any data in the backend.
+    ///
+    /// This is useful for discovering all active namespaces across the system.
+    pub async fn list_namespaces(&self) -> Result<Vec<String>> {
+        self.backend.list_namespaces().await
+    }
+
+    /// Get statistics for all namespaces.
+    ///
+    /// Returns stats for every namespace that has data in the backend.
+    pub async fn all_stats(&self) -> Result<Vec<NamespaceQueueStats>> {
+        let namespaces = self.list_namespaces().await?;
+        let mut all_stats = Vec::with_capacity(namespaces.len());
+
+        for ns in namespaces {
+            let (queue, scheduled, retry, dead) = tokio::try_join!(
+                self.backend.queue_len(&ns),
+                self.backend.schedule_len(&ns),
+                self.backend.retry_len(&ns),
+                self.backend.dead_len(&ns),
+            )?;
+
+            all_stats.push(NamespaceQueueStats {
+                namespace: ns,
+                queue,
+                scheduled,
+                retry,
+                dead,
+            });
+        }
+
+        Ok(all_stats)
+    }
+
     // ========== Statistics ==========
 
-    /// Get all queue statistics at once.
-    pub async fn stats(&self) -> Result<QueueStats> {
+    /// Get all queue statistics for a namespace.
+    pub async fn stats(&self, ns: &str) -> Result<QueueStats> {
         let (queue, scheduled, retry, dead) = tokio::try_join!(
-            self.backend.queue_len(),
-            self.backend.schedule_len(),
-            self.backend.retry_len(),
-            self.backend.dead_len(),
+            self.backend.queue_len(ns),
+            self.backend.schedule_len(ns),
+            self.backend.retry_len(ns),
+            self.backend.dead_len(ns),
         )?;
 
         Ok(QueueStats {
@@ -117,24 +183,24 @@ impl<B: Backend + Clone> AdminClient<B> {
         })
     }
 
-    /// Get the number of jobs in the immediate queue.
-    pub async fn queue_len(&self) -> Result<usize> {
-        self.backend.queue_len().await
+    /// Get the number of jobs in the immediate queue for a namespace.
+    pub async fn queue_len(&self, ns: &str) -> Result<usize> {
+        self.backend.queue_len(ns).await
     }
 
-    /// Get the number of scheduled jobs.
-    pub async fn schedule_len(&self) -> Result<usize> {
-        self.backend.schedule_len().await
+    /// Get the number of scheduled jobs for a namespace.
+    pub async fn schedule_len(&self, ns: &str) -> Result<usize> {
+        self.backend.schedule_len(ns).await
     }
 
-    /// Get the number of jobs waiting for retry.
-    pub async fn retry_len(&self) -> Result<usize> {
-        self.backend.retry_len().await
+    /// Get the number of jobs waiting for retry in a namespace.
+    pub async fn retry_len(&self, ns: &str) -> Result<usize> {
+        self.backend.retry_len(ns).await
     }
 
-    /// Get the number of dead jobs.
-    pub async fn dead_len(&self) -> Result<usize> {
-        self.backend.dead_len().await
+    /// Get the number of dead jobs in a namespace.
+    pub async fn dead_len(&self, ns: &str) -> Result<usize> {
+        self.backend.dead_len(ns).await
     }
 
     // ========== Worker Pools ==========
@@ -155,16 +221,16 @@ impl<B: Backend + Clone> AdminClient<B> {
     /// Clean up a dead worker pool and recover its in-progress jobs.
     ///
     /// This removes the worker's heartbeat and returns all jobs that were
-    /// in-progress so they can be re-enqueued.
-    pub async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<String>> {
+    /// in-progress as (namespace, job_json) tuples so they can be re-enqueued.
+    pub async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<(String, String)>> {
         self.backend.cleanup_pool(pool_id).await
     }
 
     // ========== Dead Jobs ==========
 
-    /// List dead jobs with pagination.
-    pub async fn list_dead(&self, limit: usize, offset: usize) -> Result<Vec<DeadJob>> {
-        let jobs_json = self.backend.list_dead(limit, offset).await?;
+    /// List dead jobs with pagination for a namespace.
+    pub async fn list_dead(&self, ns: &str, limit: usize, offset: usize) -> Result<Vec<DeadJob>> {
+        let jobs_json = self.backend.list_dead(ns, limit, offset).await?;
 
         let jobs = jobs_json
             .into_iter()
@@ -174,9 +240,9 @@ impl<B: Backend + Clone> AdminClient<B> {
         Ok(jobs)
     }
 
-    /// Get a dead job by its ID.
-    pub async fn get_dead(&self, job_id: &str) -> Result<Option<DeadJob>> {
-        let job_json = self.backend.get_dead_by_id(job_id).await?;
+    /// Get a dead job by its ID in a namespace.
+    pub async fn get_dead(&self, ns: &str, job_id: &str) -> Result<Option<DeadJob>> {
+        let job_json = self.backend.get_dead_by_id(ns, job_id).await?;
 
         Ok(job_json.and_then(|json| parse_dead_job(&json)))
     }
@@ -184,10 +250,10 @@ impl<B: Backend + Clone> AdminClient<B> {
     /// Retry a dead job by moving it back to the main queue.
     ///
     /// The job's status will be reset to Pending and retry count to 0.
-    pub async fn retry_dead(&self, job_id: &str) -> Result<()> {
+    pub async fn retry_dead(&self, ns: &str, job_id: &str) -> Result<()> {
         let job_json = self
             .backend
-            .get_dead_by_id(job_id)
+            .get_dead_by_id(ns, job_id)
             .await?
             .ok_or_else(|| WgError::JobNotFound(format!("Dead job {} not found", job_id)))?;
 
@@ -201,21 +267,21 @@ impl<B: Backend + Clone> AdminClient<B> {
         let updated_json = job.to_string();
 
         // Remove from dead queue and push to main queue
-        self.backend.remove_dead(&job_json).await?;
-        self.backend.push_job(&updated_json).await?;
+        self.backend.remove_dead(ns, &job_json).await?;
+        self.backend.push_job(ns, &updated_json).await?;
 
         Ok(())
     }
 
     /// Delete a dead job permanently.
-    pub async fn delete_dead(&self, job_id: &str) -> Result<()> {
+    pub async fn delete_dead(&self, ns: &str, job_id: &str) -> Result<()> {
         let job_json = self
             .backend
-            .get_dead_by_id(job_id)
+            .get_dead_by_id(ns, job_id)
             .await?
             .ok_or_else(|| WgError::JobNotFound(format!("Dead job {} not found", job_id)))?;
 
-        self.backend.remove_dead(&job_json).await
+        self.backend.remove_dead(ns, &job_json).await
     }
 
     // ========== Job Management ==========
@@ -223,37 +289,37 @@ impl<B: Backend + Clone> AdminClient<B> {
     /// Cancel a scheduled job by removing it from the schedule queue.
     ///
     /// You need to provide the full job JSON string.
-    pub async fn cancel_scheduled(&self, job_json: &str) -> Result<()> {
-        self.backend.remove_scheduled(job_json).await
+    pub async fn cancel_scheduled(&self, ns: &str, job_json: &str) -> Result<()> {
+        self.backend.remove_scheduled(ns, job_json).await
     }
 
     /// Cancel a job waiting for retry by removing it from the retry queue.
     ///
     /// You need to provide the full job JSON string.
-    pub async fn cancel_retry(&self, job_json: &str) -> Result<()> {
-        self.backend.remove_retry(job_json).await
+    pub async fn cancel_retry(&self, ns: &str, job_json: &str) -> Result<()> {
+        self.backend.remove_retry(ns, job_json).await
     }
 
     /// Unlock a job that is stuck in-progress.
     ///
     /// This removes the job from the in-progress tracking for a worker pool.
     /// Use this when a job is incorrectly marked as in-progress.
-    pub async fn unlock_job(&self, pool_id: &str, job_json: &str) -> Result<()> {
-        self.backend.complete_in_progress(pool_id, job_json).await
+    pub async fn unlock_job(&self, ns: &str, pool_id: &str, job_json: &str) -> Result<()> {
+        self.backend.complete_in_progress(ns, pool_id, job_json).await
     }
 
-    /// Get all in-progress jobs for a specific worker pool.
-    pub async fn get_in_progress_jobs(&self, pool_id: &str) -> Result<Vec<String>> {
-        self.backend.get_in_progress_jobs(pool_id).await
+    /// Get all in-progress jobs for a specific worker pool in a namespace.
+    pub async fn get_in_progress_jobs(&self, ns: &str, pool_id: &str) -> Result<Vec<String>> {
+        self.backend.get_in_progress_jobs(ns, pool_id).await
     }
 
     // ========== Concurrency Control ==========
 
-    /// Set the maximum concurrency for a job type.
+    /// Set the maximum concurrency for a job type in a namespace.
     ///
     /// Set to 0 for unlimited concurrency.
-    pub async fn set_job_concurrency(&self, job_name: &str, max: usize) -> Result<()> {
-        self.backend.set_job_concurrency(job_name, max).await
+    pub async fn set_job_concurrency(&self, ns: &str, job_name: &str, max: usize) -> Result<()> {
+        self.backend.set_job_concurrency(ns, job_name, max).await
     }
 }
 
@@ -376,4 +442,3 @@ mod tests {
         assert!(parse_dead_job(json).is_none());
     }
 }
-

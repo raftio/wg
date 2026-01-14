@@ -92,6 +92,7 @@ impl<B: Backend + Clone + 'static> Reaper<B> {
         tracing::info!(pool_id = %pool_id, "Recovering dead worker pool");
 
         // Get all in-progress jobs and clean up the pool
+        // Returns Vec<(namespace, job_json)>
         let jobs = self.backend.cleanup_pool(pool_id).await?;
 
         if jobs.is_empty() {
@@ -105,17 +106,22 @@ impl<B: Backend + Clone + 'static> Reaper<B> {
             "Recovered in-progress jobs"
         );
 
-        // Re-enqueue recovered jobs
+        // Re-enqueue recovered jobs to their respective namespaces
         let mut recovered = 0;
-        for job_json in jobs {
-            match self.backend.push_job(&job_json).await {
+        for (namespace, job_json) in jobs {
+            match self.backend.push_job(&namespace, &job_json).await {
                 Ok(()) => {
                     recovered += 1;
-                    tracing::debug!(pool_id = %pool_id, "Re-enqueued recovered job");
+                    tracing::debug!(
+                        pool_id = %pool_id,
+                        namespace = %namespace,
+                        "Re-enqueued recovered job"
+                    );
                 }
                 Err(e) => {
                     tracing::error!(
                         pool_id = %pool_id,
+                        namespace = %namespace,
                         error = %e,
                         "Failed to re-enqueue recovered job"
                     );

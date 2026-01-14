@@ -14,6 +14,7 @@ use crate::error::Result;
 pub struct Heartbeater<B: Backend> {
     backend: B,
     pool_id: String,
+    namespace: String,
     concurrency: usize,
     job_names: Vec<String>,
     interval: Duration,
@@ -28,6 +29,7 @@ impl<B: Backend + Clone + 'static> Heartbeater<B> {
     pub fn new(
         backend: B,
         pool_id: String,
+        namespace: impl Into<String>,
         concurrency: usize,
         job_names: Vec<String>,
         interval: Duration,
@@ -42,6 +44,7 @@ impl<B: Backend + Clone + 'static> Heartbeater<B> {
         Self {
             backend,
             pool_id,
+            namespace: namespace.into(),
             concurrency,
             job_names,
             interval,
@@ -57,7 +60,7 @@ impl<B: Backend + Clone + 'static> Heartbeater<B> {
     /// This sends an initial heartbeat immediately, then continues
     /// sending heartbeats at the configured interval until stopped.
     pub async fn run(&self) -> Result<()> {
-        tracing::debug!(pool_id = %self.pool_id, "Heartbeater started");
+        tracing::debug!(pool_id = %self.pool_id, namespace = %self.namespace, "Heartbeater started");
 
         // Send initial heartbeat immediately
         self.send_heartbeat().await?;
@@ -104,6 +107,7 @@ impl<B: Backend + Clone + 'static> Heartbeater<B> {
             host: self.host.clone(),
             pid: self.pid,
             job_names: self.job_names.clone(),
+            namespace: self.namespace.clone(),
         };
 
         self.backend.heartbeat(&info).await?;

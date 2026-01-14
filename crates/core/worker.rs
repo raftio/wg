@@ -131,6 +131,7 @@ where
         let heartbeater = Heartbeater::new(
             backend.clone(),
             self.pool_id.clone(),
+            self.config.namespace.clone(),
             self.config.num_workers,
             self.config.job_names.clone(),
             self.config.heartbeat_interval,
@@ -152,6 +153,7 @@ where
         // Spawn scheduler
         let scheduler = Scheduler::new(
             backend.clone(),
+            self.config.namespace.clone(),
             self.config.scheduler_interval,
             self.config.batch_size,
             self.running.clone(),
@@ -161,6 +163,7 @@ where
         // Spawn retrier
         let retrier = Retrier::new(
             backend.clone(),
+            self.config.namespace.clone(),
             self.config.retrier_interval,
             self.config.batch_size,
             self.running.clone(),
@@ -170,7 +173,11 @@ where
         // Register max concurrency for this job type (if enabled)
         if self.config.max_concurrency > 0 {
             if let Err(e) = backend
-                .set_job_concurrency(&self.config.job_name, self.config.max_concurrency)
+                .set_job_concurrency(
+                    &self.config.namespace,
+                    &self.config.job_name,
+                    self.config.max_concurrency,
+                )
                 .await
             {
                 tracing::warn!(error = %e, "Failed to set job concurrency in backend");
@@ -178,6 +185,7 @@ where
                 tracing::info!(
                     job_name = %self.config.job_name,
                     max_concurrency = self.config.max_concurrency,
+                    namespace = %self.config.namespace,
                     "Registered job concurrency limit"
                 );
             }
@@ -188,6 +196,7 @@ where
             let worker = Worker::new(
                 worker_id,
                 self.pool_id.clone(),
+                self.config.namespace.clone(),
                 self.config.job_name.clone(),
                 self.config.max_concurrency,
                 backend.clone(),
@@ -396,6 +405,7 @@ where
 {
     id: usize,
     pool_id: String,
+    namespace: String,
     #[allow(dead_code)] // Used for logging context; concurrency uses job.job_name
     job_name: String,
     max_concurrency: usize,
@@ -420,6 +430,7 @@ where
     fn new(
         id: usize,
         pool_id: String,
+        namespace: String,
         job_name: String,
         max_concurrency: usize,
         backend: B,
@@ -433,6 +444,7 @@ where
         Self {
             id,
             pool_id,
+            namespace,
             job_name,
             max_concurrency,
             backend,
@@ -476,7 +488,11 @@ where
 
     async fn fetch_and_process(&self) -> Result<bool> {
         // Pop job with timeout
-        let job_json = match self.backend.pop_job(self.fetch_timeout).await? {
+        let job_json = match self
+            .backend
+            .pop_job(&self.namespace, self.fetch_timeout)
+            .await?
+        {
             Some(json) => json,
             None => return Ok(false), // Timeout, no job available
         };
@@ -486,14 +502,18 @@ where
             Ok(job) => job,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to parse job, moving to dead queue");
-                self.backend.push_dead(&job_json).await?;
+                self.backend.push_dead(&self.namespace, &job_json).await?;
                 return Ok(true);
             }
         };
 
         // Try to acquire concurrency slot (if concurrency control is enabled)
         let acquired_slot = if self.max_concurrency > 0 {
-            match self.backend.try_acquire_concurrency(&job.job_name).await {
+            match self
+                .backend
+                .try_acquire_concurrency(&self.namespace, &job.job_name)
+                .await
+            {
                 Ok(true) => true,
                 Ok(false) => {
                     // At capacity - push job back to front of queue and wait
@@ -502,7 +522,9 @@ where
                         job_name = %job.job_name,
                         "Concurrency limit reached, re-queuing job"
                     );
-                    self.backend.push_job_front(&job_json).await?;
+                    self.backend
+                        .push_job_front(&self.namespace, &job_json)
+                        .await?;
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     return Ok(false);
                 }
@@ -519,7 +541,7 @@ where
         self.in_progress.fetch_add(1, Ordering::SeqCst);
         if let Err(e) = self
             .backend
-            .mark_in_progress(&self.pool_id, &job_json)
+            .mark_in_progress(&self.namespace, &self.pool_id, &job_json)
             .await
         {
             tracing::warn!(error = %e, "Failed to mark job in-progress in backend");
@@ -557,7 +579,9 @@ where
                     let retry_at = current_timestamp() + retry_delay.as_secs() as i64;
 
                     let updated_job_json = job.to_json()?;
-                    self.backend.retry_job(&updated_job_json, retry_at).await?;
+                    self.backend
+                        .retry_job(&self.namespace, &updated_job_json, retry_at)
+                        .await?;
 
                     tracing::debug!(
                         worker_id = self.id,
@@ -570,7 +594,9 @@ where
                     // Move to dead queue
                     job.status = JobStatus::Dead;
                     let updated_job_json = job.to_json()?;
-                    self.backend.push_dead(&updated_job_json).await?;
+                    self.backend
+                        .push_dead(&self.namespace, &updated_job_json)
+                        .await?;
 
                     tracing::warn!(
                         worker_id = self.id,
@@ -584,7 +610,11 @@ where
 
         // Release concurrency slot if we acquired one
         if acquired_slot {
-            if let Err(e) = self.backend.release_concurrency(&job.job_name).await {
+            if let Err(e) = self
+                .backend
+                .release_concurrency(&self.namespace, &job.job_name)
+                .await
+            {
                 tracing::warn!(error = %e, "Failed to release concurrency slot");
             }
         }
@@ -592,7 +622,7 @@ where
         // Done processing - remove from in-progress tracking
         if let Err(e) = self
             .backend
-            .complete_in_progress(&self.pool_id, &job_json)
+            .complete_in_progress(&self.namespace, &self.pool_id, &job_json)
             .await
         {
             tracing::warn!(error = %e, "Failed to complete job in-progress in backend");

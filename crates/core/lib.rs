@@ -20,7 +20,7 @@ mod worker;
 
 // Re-export main types
 pub use backend::{Backend, DynBackend, SharedBackend, WorkerPoolInfo};
-pub use client::Client;
+pub use client::{Client, NamespaceStats};
 pub use config::{ClientConfig, WorkerConfig, WorkerConfigBuilder};
 pub use error::{Result, WgError};
 pub use heartbeat::{generate_pool_id, Heartbeater};

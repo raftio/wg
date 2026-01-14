@@ -81,7 +81,7 @@ async fn main() -> wg_core::Result<()> {
 
     println!("Connecting to {}...", redis_url);
 
-    let backend = match RedisBackend::new(&redis_url, "wg-example").await {
+    let backend = match RedisBackend::new(&redis_url).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("Failed to connect: {}", e);
@@ -95,7 +95,7 @@ async fn main() -> wg_core::Result<()> {
     // Demo 1: Immediate jobs
     println!("--- Demo 1: Immediate Payment Jobs ---\n");
 
-    let client = Client::new(backend.clone());
+    let client = Client::new(backend.clone(), "wg-example");
 
     let payments = vec![
         PaymentJob {
@@ -132,8 +132,7 @@ async fn main() -> wg_core::Result<()> {
     // Demo 3: Retry mechanism
     println!("\n--- Demo 3: Retry (fails 2x then succeeds) ---\n");
 
-    let webhook_backend = RedisBackend::new(&redis_url, "wg-webhooks").await?;
-    let webhook_client = Client::new(webhook_backend.clone());
+    let webhook_client = Client::new(backend.clone(), "wg-webhooks");
 
     let webhook = WebhookJob {
         url: "https://api.example.com/webhook".to_string(),
@@ -157,6 +156,7 @@ async fn main() -> wg_core::Result<()> {
     println!("  webhook jobs: {}", webhook_client.queue_len().await?);
     println!("\nPress Ctrl+C to stop\n");
 
+    let webhook_backend = backend.clone();
     let webhook_handle = tokio::spawn(async move {
         let mut pool = WorkerPool::builder()
             .backend(webhook_backend)
