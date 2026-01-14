@@ -710,7 +710,7 @@ impl Backend for PostgresBackend {
             Self::concurrency_table(ns)
         ))
         .bind(job_name)
-        .bind(max as i64)
+        .bind(max as i32)
         .execute(&self.pool)
         .await
         .map_err(|e| WgError::Backend(format!("Failed to set job concurrency: {}", e)))?;
@@ -720,7 +720,7 @@ impl Backend for PostgresBackend {
     async fn try_acquire_concurrency(&self, ns: &str, job_name: &str) -> Result<bool> {
         // Use a CTE to atomically check and increment
         // Returns 1 row if acquired, 0 rows if at limit
-        let result: Option<(i64,)> = sqlx::query_as(&format!(
+        let result: Option<(i32,)> = sqlx::query_as(&format!(
             r#"
             UPDATE {} 
             SET inflight = inflight + 1 
@@ -739,7 +739,7 @@ impl Backend for PostgresBackend {
         }
 
         // Check if the job_name exists - if not, insert with inflight=1
-        let exists: Option<(i64,)> = sqlx::query_as(&format!(
+        let exists: Option<(i32,)> = sqlx::query_as(&format!(
             "SELECT 1 FROM {} WHERE job_name = $1",
             Self::concurrency_table(ns)
         ))
