@@ -161,6 +161,17 @@ pub trait Backend: Send + Sync {
     /// This is useful for admin/monitoring tools to discover all active namespaces.
     async fn list_namespaces(&self) -> Result<Vec<String>>;
 
+    /// Initialize the namespace (create required tables/structures).
+    ///
+    /// This is idempotent - safe to call multiple times. SQL backends will
+    /// create tables if they don't exist. Redis and other backends that
+    /// don't require initialization will do nothing.
+    async fn init_namespace(&self, namespace: &str) -> Result<()> {
+        // Default implementation is no-op for backends that don't need initialization
+        let _ = namespace;
+        Ok(())
+    }
+
     // ========== Concurrency Control ==========
 
     /// Set the maximum concurrency for a job type in a namespace.
@@ -316,6 +327,10 @@ impl Backend for SharedBackend {
 
     async fn list_namespaces(&self) -> Result<Vec<String>> {
         self.inner.list_namespaces().await
+    }
+
+    async fn init_namespace(&self, namespace: &str) -> Result<()> {
+        self.inner.init_namespace(namespace).await
     }
 
     async fn set_job_concurrency(&self, ns: &str, job_name: &str, max: usize) -> Result<()> {
