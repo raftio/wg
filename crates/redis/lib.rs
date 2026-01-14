@@ -582,6 +582,11 @@ impl Backend for RedisBackend {
         Ok(result)
     }
 
+    async fn init_namespace(&self, _namespace: &str) -> Result<()> {
+        // Redis doesn't require namespace initialization - keys are created on demand
+        Ok(())
+    }
+
     // ========== Concurrency Control ==========
 
     async fn set_job_concurrency(&self, ns: &str, job_name: &str, max: usize) -> Result<()> {

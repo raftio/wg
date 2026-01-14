@@ -123,6 +123,16 @@ where
             .take()
             .ok_or_else(|| WgError::Config("Backend not configured".to_string()))?;
 
+        // Initialize namespace if needed (idempotent for SQL backends)
+        if let Err(e) = backend.init_namespace(&self.config.namespace).await {
+            tracing::warn!(
+                error = %e,
+                namespace = %self.config.namespace,
+                "Failed to initialize namespace, continuing anyway"
+            );
+            // Continue anyway - might already be initialized or backend doesn't need it
+        }
+
         self.running.store(true, Ordering::SeqCst);
 
         let mut tasks = JoinSet::new();

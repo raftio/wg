@@ -682,6 +682,11 @@ impl Backend for MySqlBackend {
         Ok(result)
     }
 
+    async fn init_namespace(&self, namespace: &str) -> Result<()> {
+        // Delegate to the struct's init_namespace method
+        <MySqlBackend>::init_namespace(self, namespace).await
+    }
+
     // ========== Concurrency Control ==========
 
     async fn set_job_concurrency(&self, ns: &str, job_name: &str, max: usize) -> Result<()> {
