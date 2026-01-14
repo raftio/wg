@@ -26,12 +26,12 @@
 //!     // Get queue statistics for all namespaces
 //!     let all_stats = admin.all_stats().await?;
 //!     for stats in all_stats {
-//!         println!("{}: queue={}, dead={}", stats.namespace, stats.queue, stats.dead);
+//!         println!("{}: queue={}, dead={}", stats.namespace, stats.queue_len, stats.dead_len);
 //!     }
 //!
 //!     // Get stats for a specific namespace
 //!     let stats = admin.stats("myapp").await?;
-//!     println!("Queue: {}, Dead: {}", stats.queue, stats.dead);
+//!     println!("Queue: {}, Dead: {}", stats.queue_len, stats.dead_len);
 //!
 //!     // List worker pools
 //!     let workers = admin.list_workers().await?;
@@ -53,13 +53,13 @@ pub use wg_core::{Job, JobId, JobOptions, JobStatus, Result, WgError};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueStats {
     /// Number of jobs in the immediate queue.
-    pub queue: usize,
+    pub queue_len: usize,
     /// Number of jobs scheduled for future execution.
-    pub scheduled: usize,
+    pub schedule_len: usize,
     /// Number of jobs waiting for retry.
-    pub retry: usize,
+    pub retry_len: usize,
     /// Number of dead (failed) jobs.
-    pub dead: usize,
+    pub dead_len: usize,
 }
 
 /// Queue statistics with namespace info.
@@ -68,13 +68,13 @@ pub struct NamespaceQueueStats {
     /// The namespace name.
     pub namespace: String,
     /// Number of jobs in the immediate queue.
-    pub queue: usize,
+    pub queue_len: usize,
     /// Number of jobs scheduled for future execution.
-    pub scheduled: usize,
+    pub schedule_len: usize,
     /// Number of jobs waiting for retry.
-    pub retry: usize,
+    pub retry_len: usize,
     /// Number of dead (failed) jobs.
-    pub dead: usize,
+    pub dead_len: usize,
 }
 
 /// A parsed dead job with its metadata.
@@ -145,7 +145,7 @@ impl<B: Backend + Clone> AdminClient<B> {
         let mut all_stats = Vec::with_capacity(namespaces.len());
 
         for ns in namespaces {
-            let (queue, scheduled, retry, dead) = tokio::try_join!(
+            let (queue_len, schedule_len, retry_len, dead_len) = tokio::try_join!(
                 self.backend.queue_len(&ns),
                 self.backend.schedule_len(&ns),
                 self.backend.retry_len(&ns),
@@ -154,10 +154,10 @@ impl<B: Backend + Clone> AdminClient<B> {
 
             all_stats.push(NamespaceQueueStats {
                 namespace: ns,
-                queue,
-                scheduled,
-                retry,
-                dead,
+                queue_len,
+                schedule_len,
+                retry_len,
+                dead_len,
             });
         }
 
@@ -168,7 +168,7 @@ impl<B: Backend + Clone> AdminClient<B> {
 
     /// Get all queue statistics for a namespace.
     pub async fn stats(&self, ns: &str) -> Result<QueueStats> {
-        let (queue, scheduled, retry, dead) = tokio::try_join!(
+        let (queue_len, schedule_len, retry_len, dead_len) = tokio::try_join!(
             self.backend.queue_len(ns),
             self.backend.schedule_len(ns),
             self.backend.retry_len(ns),
@@ -176,10 +176,10 @@ impl<B: Backend + Clone> AdminClient<B> {
         )?;
 
         Ok(QueueStats {
-            queue,
-            scheduled,
-            retry,
-            dead,
+            queue_len,
+            schedule_len,
+            retry_len,
+            dead_len,
         })
     }
 
@@ -344,34 +344,34 @@ mod tests {
     #[test]
     fn test_queue_stats_default() {
         let stats = QueueStats {
-            queue: 10,
-            scheduled: 5,
-            retry: 2,
-            dead: 1,
+            queue_len: 10,
+            schedule_len: 5,
+            retry_len: 2,
+            dead_len: 1,
         };
 
-        assert_eq!(stats.queue, 10);
-        assert_eq!(stats.scheduled, 5);
-        assert_eq!(stats.retry, 2);
-        assert_eq!(stats.dead, 1);
+        assert_eq!(stats.queue_len, 10);
+        assert_eq!(stats.schedule_len, 5);
+        assert_eq!(stats.retry_len, 2);
+        assert_eq!(stats.dead_len, 1);
     }
 
     #[test]
     fn test_queue_stats_serialization() {
         let stats = QueueStats {
-            queue: 10,
-            scheduled: 5,
-            retry: 2,
-            dead: 1,
+            queue_len: 10,
+            schedule_len: 5,
+            retry_len: 2,
+            dead_len: 1,
         };
 
         let json = serde_json::to_string(&stats).unwrap();
         let parsed: QueueStats = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.queue, stats.queue);
-        assert_eq!(parsed.scheduled, stats.scheduled);
-        assert_eq!(parsed.retry, stats.retry);
-        assert_eq!(parsed.dead, stats.dead);
+        assert_eq!(parsed.queue_len, stats.queue_len);
+        assert_eq!(parsed.schedule_len, stats.schedule_len);
+        assert_eq!(parsed.retry_len, stats.retry_len);
+        assert_eq!(parsed.dead_len, stats.dead_len);
     }
 
     #[test]
