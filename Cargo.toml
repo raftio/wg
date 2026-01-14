@@ -7,10 +7,8 @@ members = [
     "crates/postgres",
     "crates/mysql",
     "crates/sqlite",
-    "crates/server",
     "examples/basic",
     "examples/redis",
-    "examples/server",
 ]
 
 [workspace.package]

@@ -44,7 +44,7 @@ async fn main() -> wg_core::Result<()> {
     // Create SQLite in-memory backend (no setup required)
     let backend = SqliteBackend::in_memory("example").await?;
 
-    let client = Client::new(backend.clone());
+    let client = Client::new(backend.clone(), "example");
 
     let emails = vec![
         EmailJob {

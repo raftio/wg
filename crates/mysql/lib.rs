@@ -10,8 +10,8 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> wg_core::Result<()> {
-//!     let backend = MySqlBackend::new("mysql://root@localhost/mydb", "myapp").await?;
-//!     let client = Client::new(backend);
+//!     let backend = MySqlBackend::new("mysql://root@localhost/mydb").await?;
+//!     let client = Client::new(backend, "myapp");
 //!     Ok(())
 //! }
 //! ```
@@ -28,35 +28,59 @@ const WG_TABLE_PREFIX: &str = "_wg_tb_";
 #[derive(Clone)]
 pub struct MySqlBackend {
     pool: MySqlPool,
-    namespace: String,
 }
 
 impl MySqlBackend {
     /// Create a new MySQL backend.
-    pub async fn new(database_url: &str, namespace: &str) -> Result<Self> {
+    pub async fn new(database_url: &str) -> Result<Self> {
         let pool = MySqlPoolOptions::new()
             .max_connections(10)
             .connect(database_url)
             .await
             .map_err(|e| WgError::Backend(format!("Failed to connect to MySQL: {}", e)))?;
 
-        let backend = Self {
-            pool,
-            namespace: namespace.to_string(),
-        };
+        let backend = Self { pool };
 
-        // Initialize tables
-        backend.init_tables().await?;
+        // Initialize global tables
+        backend.init_global_tables().await?;
 
         Ok(backend)
     }
 
-    /// Initialize the required tables.
-    async fn init_tables(&self) -> Result<()> {
-        let jobs_table = format!("{}{}_jobs", WG_TABLE_PREFIX, self.namespace);
-        let scheduled_table = format!("{}{}_scheduled", WG_TABLE_PREFIX, self.namespace);
-        let retry_table = format!("{}{}_retry", WG_TABLE_PREFIX, self.namespace);
-        let dead_table = format!("{}{}_dead", WG_TABLE_PREFIX, self.namespace);
+    /// Initialize the global tables (not namespace-specific).
+    async fn init_global_tables(&self) -> Result<()> {
+        // Create worker pools table for heartbeat monitoring (global)
+        let worker_pools_table = format!("{}worker_pools", WG_TABLE_PREFIX);
+        sqlx::query(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {} (
+                pool_id VARCHAR(255) PRIMARY KEY,
+                heartbeat_at BIGINT NOT NULL,
+                started_at BIGINT NOT NULL,
+                concurrency INT NOT NULL,
+                host VARCHAR(255) NOT NULL,
+                pid INT NOT NULL,
+                job_names TEXT NOT NULL,
+                namespace VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_heartbeat_at (heartbeat_at)
+            )
+            "#,
+            worker_pools_table
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to create worker_pools table: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Initialize the required tables for a namespace.
+    pub async fn init_namespace(&self, namespace: &str) -> Result<()> {
+        let jobs_table = format!("{}{}_jobs", WG_TABLE_PREFIX, namespace);
+        let scheduled_table = format!("{}{}_scheduled", WG_TABLE_PREFIX, namespace);
+        let retry_table = format!("{}{}_retry", WG_TABLE_PREFIX, namespace);
+        let dead_table = format!("{}{}_dead", WG_TABLE_PREFIX, namespace);
 
         // Create jobs table (FIFO queue)
         sqlx::query(&format!(
@@ -122,30 +146,8 @@ impl MySqlBackend {
         .await
         .map_err(|e| WgError::Backend(format!("Failed to create dead table: {}", e)))?;
 
-        // Create worker pools table for heartbeat monitoring
-        let worker_pools_table = format!("{}{}_worker_pools", WG_TABLE_PREFIX, self.namespace);
-        sqlx::query(&format!(
-            r#"
-            CREATE TABLE IF NOT EXISTS {} (
-                pool_id VARCHAR(255) PRIMARY KEY,
-                heartbeat_at BIGINT NOT NULL,
-                started_at BIGINT NOT NULL,
-                concurrency INT NOT NULL,
-                host VARCHAR(255) NOT NULL,
-                pid INT NOT NULL,
-                job_names TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                INDEX idx_heartbeat_at (heartbeat_at)
-            )
-            "#,
-            worker_pools_table
-        ))
-        .execute(&self.pool)
-        .await
-        .map_err(|e| WgError::Backend(format!("Failed to create worker_pools table: {}", e)))?;
-
         // Create in_progress table for tracking jobs being processed
-        let in_progress_table = format!("{}{}_in_progress", WG_TABLE_PREFIX, self.namespace);
+        let in_progress_table = format!("{}{}_in_progress", WG_TABLE_PREFIX, namespace);
         sqlx::query(&format!(
             r#"
             CREATE TABLE IF NOT EXISTS {} (
@@ -164,7 +166,7 @@ impl MySqlBackend {
         .map_err(|e| WgError::Backend(format!("Failed to create in_progress table: {}", e)))?;
 
         // Create concurrency table for job-level concurrency control
-        let concurrency_table = format!("{}{}_concurrency", WG_TABLE_PREFIX, self.namespace);
+        let concurrency_table = format!("{}{}_concurrency", WG_TABLE_PREFIX, namespace);
         sqlx::query(&format!(
             r#"
             CREATE TABLE IF NOT EXISTS {} (
@@ -182,41 +184,41 @@ impl MySqlBackend {
         Ok(())
     }
 
-    fn jobs_table(&self) -> String {
-        format!("{}{}_jobs", WG_TABLE_PREFIX, self.namespace)
+    fn jobs_table(ns: &str) -> String {
+        format!("{}{}_jobs", WG_TABLE_PREFIX, ns)
     }
 
-    fn scheduled_table(&self) -> String {
-        format!("{}{}_scheduled", WG_TABLE_PREFIX, self.namespace)
+    fn scheduled_table(ns: &str) -> String {
+        format!("{}{}_scheduled", WG_TABLE_PREFIX, ns)
     }
 
-    fn retry_table(&self) -> String {
-        format!("{}{}_retry", WG_TABLE_PREFIX, self.namespace)
+    fn retry_table(ns: &str) -> String {
+        format!("{}{}_retry", WG_TABLE_PREFIX, ns)
     }
 
-    fn dead_table(&self) -> String {
-        format!("{}{}_dead", WG_TABLE_PREFIX, self.namespace)
+    fn dead_table(ns: &str) -> String {
+        format!("{}{}_dead", WG_TABLE_PREFIX, ns)
     }
 
-    fn worker_pools_table(&self) -> String {
-        format!("{}{}_worker_pools", WG_TABLE_PREFIX, self.namespace)
+    fn worker_pools_table() -> String {
+        format!("{}worker_pools", WG_TABLE_PREFIX)
     }
 
-    fn in_progress_table(&self) -> String {
-        format!("{}{}_in_progress", WG_TABLE_PREFIX, self.namespace)
+    fn in_progress_table(ns: &str) -> String {
+        format!("{}{}_in_progress", WG_TABLE_PREFIX, ns)
     }
 
-    fn concurrency_table(&self) -> String {
-        format!("{}{}_concurrency", WG_TABLE_PREFIX, self.namespace)
+    fn concurrency_table(ns: &str) -> String {
+        format!("{}{}_concurrency", WG_TABLE_PREFIX, ns)
     }
 }
 
 #[async_trait]
 impl Backend for MySqlBackend {
-    async fn push_job(&self, job_json: &str) -> Result<()> {
+    async fn push_job(&self, ns: &str, job_json: &str) -> Result<()> {
         sqlx::query(&format!(
             "INSERT INTO {} (job_json) VALUES (?)",
-            self.jobs_table()
+            Self::jobs_table(ns)
         ))
         .bind(job_json)
         .execute(&self.pool)
@@ -225,7 +227,7 @@ impl Backend for MySqlBackend {
         Ok(())
     }
 
-    async fn pop_job(&self, timeout: Duration) -> Result<Option<String>> {
+    async fn pop_job(&self, ns: &str, timeout: Duration) -> Result<Option<String>> {
         let deadline = tokio::time::Instant::now() + timeout;
         let poll_interval = Duration::from_millis(100);
 
@@ -240,7 +242,7 @@ impl Backend for MySqlBackend {
             // Select the oldest job
             let result: Option<(i64, String)> = sqlx::query_as(&format!(
                 "SELECT id, job_json FROM {} ORDER BY id LIMIT 1 FOR UPDATE",
-                self.jobs_table()
+                Self::jobs_table(ns)
             ))
             .fetch_optional(&mut *tx)
             .await
@@ -248,7 +250,7 @@ impl Backend for MySqlBackend {
 
             if let Some((id, job_json)) = result {
                 // Delete the job
-                sqlx::query(&format!("DELETE FROM {} WHERE id = ?", self.jobs_table()))
+                sqlx::query(&format!("DELETE FROM {} WHERE id = ?", Self::jobs_table(ns)))
                     .bind(id)
                     .execute(&mut *tx)
                     .await
@@ -275,10 +277,33 @@ impl Backend for MySqlBackend {
         }
     }
 
-    async fn schedule_job(&self, job_json: &str, run_at: i64) -> Result<()> {
+    async fn push_job_front(&self, ns: &str, job_json: &str) -> Result<()> {
+        // For MySQL, insert with a lower id to make it come first in FIFO
+        sqlx::query(&format!(
+            "INSERT INTO {} (id, job_json) VALUES ((SELECT COALESCE(MIN(t.id), 0) - 1 FROM (SELECT id FROM {}) t), ?)",
+            Self::jobs_table(ns),
+            Self::jobs_table(ns)
+        ))
+        .bind(job_json)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to push job to front: {}", e)))?;
+        Ok(())
+    }
+
+    async fn queue_len(&self, ns: &str) -> Result<usize> {
+        let row: (i64,) =
+            sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", Self::jobs_table(ns)))
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| WgError::Backend(format!("Failed to get queue length: {}", e)))?;
+        Ok(row.0 as usize)
+    }
+
+    async fn schedule_job(&self, ns: &str, job_json: &str, run_at: i64) -> Result<()> {
         sqlx::query(&format!(
             "INSERT INTO {} (job_json, run_at) VALUES (?, ?)",
-            self.scheduled_table()
+            Self::scheduled_table(ns)
         ))
         .bind(job_json)
         .bind(run_at)
@@ -288,10 +313,10 @@ impl Backend for MySqlBackend {
         Ok(())
     }
 
-    async fn get_due_scheduled(&self, now: i64, limit: usize) -> Result<Vec<String>> {
+    async fn get_due_scheduled(&self, ns: &str, now: i64, limit: usize) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(&format!(
             "SELECT job_json FROM {} WHERE run_at <= ? ORDER BY run_at LIMIT ?",
-            self.scheduled_table()
+            Self::scheduled_table(ns)
         ))
         .bind(now)
         .bind(limit as i64)
@@ -302,10 +327,10 @@ impl Backend for MySqlBackend {
         Ok(rows.into_iter().map(|(json,)| json).collect())
     }
 
-    async fn remove_scheduled(&self, job_json: &str) -> Result<()> {
+    async fn remove_scheduled(&self, ns: &str, job_json: &str) -> Result<()> {
         sqlx::query(&format!(
             "DELETE FROM {} WHERE job_json = ? LIMIT 1",
-            self.scheduled_table()
+            Self::scheduled_table(ns)
         ))
         .bind(job_json)
         .execute(&self.pool)
@@ -314,10 +339,19 @@ impl Backend for MySqlBackend {
         Ok(())
     }
 
-    async fn retry_job(&self, job_json: &str, retry_at: i64) -> Result<()> {
+    async fn schedule_len(&self, ns: &str) -> Result<usize> {
+        let row: (i64,) =
+            sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", Self::scheduled_table(ns)))
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| WgError::Backend(format!("Failed to get schedule length: {}", e)))?;
+        Ok(row.0 as usize)
+    }
+
+    async fn retry_job(&self, ns: &str, job_json: &str, retry_at: i64) -> Result<()> {
         sqlx::query(&format!(
             "INSERT INTO {} (job_json, retry_at) VALUES (?, ?)",
-            self.retry_table()
+            Self::retry_table(ns)
         ))
         .bind(job_json)
         .bind(retry_at)
@@ -327,10 +361,10 @@ impl Backend for MySqlBackend {
         Ok(())
     }
 
-    async fn get_due_retries(&self, now: i64, limit: usize) -> Result<Vec<String>> {
+    async fn get_due_retries(&self, ns: &str, now: i64, limit: usize) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(&format!(
             "SELECT job_json FROM {} WHERE retry_at <= ? ORDER BY retry_at LIMIT ?",
-            self.retry_table()
+            Self::retry_table(ns)
         ))
         .bind(now)
         .bind(limit as i64)
@@ -341,10 +375,10 @@ impl Backend for MySqlBackend {
         Ok(rows.into_iter().map(|(json,)| json).collect())
     }
 
-    async fn remove_retry(&self, job_json: &str) -> Result<()> {
+    async fn remove_retry(&self, ns: &str, job_json: &str) -> Result<()> {
         sqlx::query(&format!(
             "DELETE FROM {} WHERE job_json = ? LIMIT 1",
-            self.retry_table()
+            Self::retry_table(ns)
         ))
         .bind(job_json)
         .execute(&self.pool)
@@ -353,10 +387,19 @@ impl Backend for MySqlBackend {
         Ok(())
     }
 
-    async fn push_dead(&self, job_json: &str) -> Result<()> {
+    async fn retry_len(&self, ns: &str) -> Result<usize> {
+        let row: (i64,) =
+            sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", Self::retry_table(ns)))
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| WgError::Backend(format!("Failed to get retry length: {}", e)))?;
+        Ok(row.0 as usize)
+    }
+
+    async fn push_dead(&self, ns: &str, job_json: &str) -> Result<()> {
         sqlx::query(&format!(
             "INSERT INTO {} (job_json) VALUES (?)",
-            self.dead_table()
+            Self::dead_table(ns)
         ))
         .bind(job_json)
         .execute(&self.pool)
@@ -365,43 +408,19 @@ impl Backend for MySqlBackend {
         Ok(())
     }
 
-    async fn queue_len(&self) -> Result<usize> {
-        let row: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", self.jobs_table()))
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| WgError::Backend(format!("Failed to get queue length: {}", e)))?;
-        Ok(row.0 as usize)
-    }
-
-    async fn schedule_len(&self) -> Result<usize> {
+    async fn dead_len(&self, ns: &str) -> Result<usize> {
         let row: (i64,) =
-            sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", self.scheduled_table()))
+            sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", Self::dead_table(ns)))
                 .fetch_one(&self.pool)
                 .await
-                .map_err(|e| WgError::Backend(format!("Failed to get schedule length: {}", e)))?;
+                .map_err(|e| WgError::Backend(format!("Failed to get dead length: {}", e)))?;
         Ok(row.0 as usize)
     }
 
-    async fn retry_len(&self) -> Result<usize> {
-        let row: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", self.retry_table()))
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| WgError::Backend(format!("Failed to get retry length: {}", e)))?;
-        Ok(row.0 as usize)
-    }
-
-    async fn dead_len(&self) -> Result<usize> {
-        let row: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", self.dead_table()))
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| WgError::Backend(format!("Failed to get dead length: {}", e)))?;
-        Ok(row.0 as usize)
-    }
-
-    async fn list_dead(&self, limit: usize, offset: usize) -> Result<Vec<String>> {
+    async fn list_dead(&self, ns: &str, limit: usize, offset: usize) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(&format!(
             "SELECT job_json FROM {} ORDER BY id DESC LIMIT ? OFFSET ?",
-            self.dead_table()
+            Self::dead_table(ns)
         ))
         .bind(limit as i64)
         .bind(offset as i64)
@@ -412,12 +431,12 @@ impl Backend for MySqlBackend {
         Ok(rows.into_iter().map(|(json,)| json).collect())
     }
 
-    async fn get_dead_by_id(&self, job_id: &str) -> Result<Option<String>> {
+    async fn get_dead_by_id(&self, ns: &str, job_id: &str) -> Result<Option<String>> {
         // Search for the job by ID in the JSON
         let pattern = format!("%{}%", job_id);
         let row: Option<(String,)> = sqlx::query_as(&format!(
             "SELECT job_json FROM {} WHERE job_json LIKE ? LIMIT 1",
-            self.dead_table()
+            Self::dead_table(ns)
         ))
         .bind(&pattern)
         .fetch_optional(&self.pool)
@@ -427,10 +446,10 @@ impl Backend for MySqlBackend {
         Ok(row.map(|(json,)| json))
     }
 
-    async fn remove_dead(&self, job_json: &str) -> Result<()> {
+    async fn remove_dead(&self, ns: &str, job_json: &str) -> Result<()> {
         sqlx::query(&format!(
             "DELETE FROM {} WHERE job_json = ? LIMIT 1",
-            self.dead_table()
+            Self::dead_table(ns)
         ))
         .bind(job_json)
         .execute(&self.pool)
@@ -447,16 +466,17 @@ impl Backend for MySqlBackend {
 
         sqlx::query(&format!(
             r#"
-            INSERT INTO {} (pool_id, heartbeat_at, started_at, concurrency, host, pid, job_names)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO {} (pool_id, heartbeat_at, started_at, concurrency, host, pid, job_names, namespace)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
                 heartbeat_at = VALUES(heartbeat_at),
                 concurrency = VALUES(concurrency),
                 host = VALUES(host),
                 pid = VALUES(pid),
-                job_names = VALUES(job_names)
+                job_names = VALUES(job_names),
+                namespace = VALUES(namespace)
             "#,
-            self.worker_pools_table()
+            Self::worker_pools_table()
         ))
         .bind(&info.pool_id)
         .bind(info.heartbeat_at)
@@ -465,6 +485,7 @@ impl Backend for MySqlBackend {
         .bind(&info.host)
         .bind(info.pid as i32)
         .bind(&job_names_json)
+        .bind(&info.namespace)
         .execute(&self.pool)
         .await
         .map_err(|e| WgError::Backend(format!("Failed to send heartbeat: {}", e)))?;
@@ -475,30 +496,21 @@ impl Backend for MySqlBackend {
         // Remove from worker_pools table
         sqlx::query(&format!(
             "DELETE FROM {} WHERE pool_id = ?",
-            self.worker_pools_table()
+            Self::worker_pools_table()
         ))
         .bind(pool_id)
         .execute(&self.pool)
         .await
         .map_err(|e| WgError::Backend(format!("Failed to remove heartbeat: {}", e)))?;
 
-        // Also clean up in_progress jobs
-        sqlx::query(&format!(
-            "DELETE FROM {} WHERE pool_id = ?",
-            self.in_progress_table()
-        ))
-        .bind(pool_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| WgError::Backend(format!("Failed to clean up in_progress: {}", e)))?;
-
         Ok(())
     }
 
     async fn list_worker_pools(&self) -> Result<Vec<WorkerPoolInfo>> {
-        let rows: Vec<(String, i64, i64, i32, String, i32, String)> = sqlx::query_as(&format!(
-            "SELECT pool_id, heartbeat_at, started_at, concurrency, host, pid, job_names FROM {}",
-            self.worker_pools_table()
+        let rows: Vec<(String, i64, i64, i32, String, i32, String, String)> = sqlx::query_as(
+            &format!(
+            "SELECT pool_id, heartbeat_at, started_at, concurrency, host, pid, job_names, namespace FROM {}",
+            Self::worker_pools_table()
         ))
         .fetch_all(&self.pool)
         .await
@@ -507,7 +519,7 @@ impl Backend for MySqlBackend {
         let pools = rows
             .into_iter()
             .map(
-                |(pool_id, heartbeat_at, started_at, concurrency, host, pid, job_names)| {
+                |(pool_id, heartbeat_at, started_at, concurrency, host, pid, job_names, namespace)| {
                     WorkerPoolInfo {
                         pool_id,
                         heartbeat_at,
@@ -516,6 +528,7 @@ impl Backend for MySqlBackend {
                         host,
                         pid: pid as u32,
                         job_names: serde_json::from_str(&job_names).unwrap_or_default(),
+                        namespace,
                     }
                 },
             )
@@ -533,7 +546,7 @@ impl Backend for MySqlBackend {
 
         let rows: Vec<(String,)> = sqlx::query_as(&format!(
             "SELECT pool_id FROM {} WHERE heartbeat_at < ?",
-            self.worker_pools_table()
+            Self::worker_pools_table()
         ))
         .bind(stale_threshold)
         .fetch_all(&self.pool)
@@ -545,7 +558,7 @@ impl Backend for MySqlBackend {
 
     // ========== In-Progress Job Tracking ==========
 
-    async fn mark_in_progress(&self, pool_id: &str, job_json: &str) -> Result<()> {
+    async fn mark_in_progress(&self, ns: &str, pool_id: &str, job_json: &str) -> Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -553,7 +566,7 @@ impl Backend for MySqlBackend {
 
         sqlx::query(&format!(
             "INSERT INTO {} (pool_id, job_json, started_at) VALUES (?, ?, ?)",
-            self.in_progress_table()
+            Self::in_progress_table(ns)
         ))
         .bind(pool_id)
         .bind(job_json)
@@ -564,10 +577,10 @@ impl Backend for MySqlBackend {
         Ok(())
     }
 
-    async fn complete_in_progress(&self, pool_id: &str, job_json: &str) -> Result<()> {
+    async fn complete_in_progress(&self, ns: &str, pool_id: &str, job_json: &str) -> Result<()> {
         sqlx::query(&format!(
             "DELETE FROM {} WHERE pool_id = ? AND job_json = ? LIMIT 1",
-            self.in_progress_table()
+            Self::in_progress_table(ns)
         ))
         .bind(pool_id)
         .bind(job_json)
@@ -577,10 +590,10 @@ impl Backend for MySqlBackend {
         Ok(())
     }
 
-    async fn get_in_progress_jobs(&self, pool_id: &str) -> Result<Vec<String>> {
+    async fn get_in_progress_jobs(&self, ns: &str, pool_id: &str) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(&format!(
             "SELECT job_json FROM {} WHERE pool_id = ?",
-            self.in_progress_table()
+            Self::in_progress_table(ns)
         ))
         .bind(pool_id)
         .fetch_all(&self.pool)
@@ -590,11 +603,38 @@ impl Backend for MySqlBackend {
         Ok(rows.into_iter().map(|(json,)| json).collect())
     }
 
-    async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<String>> {
-        // First get all in-progress jobs
-        let jobs = self.get_in_progress_jobs(pool_id).await?;
+    async fn cleanup_pool(&self, pool_id: &str) -> Result<Vec<(String, String)>> {
+        // First get the namespace from the worker pool
+        let row: Option<(String,)> = sqlx::query_as(&format!(
+            "SELECT namespace FROM {} WHERE pool_id = ?",
+            Self::worker_pools_table()
+        ))
+        .bind(pool_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| WgError::Backend(format!("Failed to get pool namespace: {}", e)))?;
 
-        // Then remove the heartbeat (which also cleans up in_progress)
+        let mut jobs = Vec::new();
+
+        if let Some((namespace,)) = row {
+            // Get all in-progress jobs
+            let in_progress_jobs = self.get_in_progress_jobs(&namespace, pool_id).await?;
+            for job_json in in_progress_jobs {
+                jobs.push((namespace.clone(), job_json));
+            }
+
+            // Clean up in_progress table
+            sqlx::query(&format!(
+                "DELETE FROM {} WHERE pool_id = ?",
+                Self::in_progress_table(&namespace)
+            ))
+            .bind(pool_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| WgError::Backend(format!("Failed to clean up in_progress: {}", e)))?;
+        }
+
+        // Remove the heartbeat
         self.remove_heartbeat(pool_id).await?;
 
         Ok(jobs)
@@ -602,14 +642,14 @@ impl Backend for MySqlBackend {
 
     // ========== Concurrency Control ==========
 
-    async fn set_job_concurrency(&self, job_name: &str, max: usize) -> Result<()> {
+    async fn set_job_concurrency(&self, ns: &str, job_name: &str, max: usize) -> Result<()> {
         sqlx::query(&format!(
             r#"
             INSERT INTO {} (job_name, max_concurrency, inflight)
             VALUES (?, ?, 0)
             ON DUPLICATE KEY UPDATE max_concurrency = VALUES(max_concurrency)
             "#,
-            self.concurrency_table()
+            Self::concurrency_table(ns)
         ))
         .bind(job_name)
         .bind(max as i64)
@@ -619,7 +659,7 @@ impl Backend for MySqlBackend {
         Ok(())
     }
 
-    async fn try_acquire_concurrency(&self, job_name: &str) -> Result<bool> {
+    async fn try_acquire_concurrency(&self, ns: &str, job_name: &str) -> Result<bool> {
         // Use a transaction to atomically check and increment
         let mut tx = self
             .pool
@@ -634,7 +674,7 @@ impl Backend for MySqlBackend {
             SET inflight = inflight + 1 
             WHERE job_name = ? AND (max_concurrency = 0 OR inflight < max_concurrency)
             "#,
-            self.concurrency_table()
+            Self::concurrency_table(ns)
         ))
         .bind(job_name)
         .execute(&mut *tx)
@@ -651,7 +691,7 @@ impl Backend for MySqlBackend {
         // Check if the job_name exists - if not, insert with inflight=1
         let exists: Option<(i64,)> = sqlx::query_as(&format!(
             "SELECT 1 FROM {} WHERE job_name = ?",
-            self.concurrency_table()
+            Self::concurrency_table(ns)
         ))
         .bind(job_name)
         .fetch_optional(&mut *tx)
@@ -662,7 +702,7 @@ impl Backend for MySqlBackend {
             // No concurrency limit set for this job type, insert with inflight=1 and max=0 (unlimited)
             sqlx::query(&format!(
                 "INSERT IGNORE INTO {} (job_name, max_concurrency, inflight) VALUES (?, 0, 1)",
-                self.concurrency_table()
+                Self::concurrency_table(ns)
             ))
             .bind(job_name)
             .execute(&mut *tx)
@@ -683,29 +723,15 @@ impl Backend for MySqlBackend {
         Ok(false)
     }
 
-    async fn release_concurrency(&self, job_name: &str) -> Result<()> {
+    async fn release_concurrency(&self, ns: &str, job_name: &str) -> Result<()> {
         sqlx::query(&format!(
             "UPDATE {} SET inflight = GREATEST(0, inflight - 1) WHERE job_name = ?",
-            self.concurrency_table()
+            Self::concurrency_table(ns)
         ))
         .bind(job_name)
         .execute(&self.pool)
         .await
         .map_err(|e| WgError::Backend(format!("Failed to release concurrency: {}", e)))?;
-        Ok(())
-    }
-
-    async fn push_job_front(&self, job_json: &str) -> Result<()> {
-        // For MySQL, insert with a lower id to make it come first in FIFO
-        sqlx::query(&format!(
-            "INSERT INTO {} (id, job_json) VALUES ((SELECT COALESCE(MIN(t.id), 0) - 1 FROM (SELECT id FROM {}) t), ?)",
-            self.jobs_table(),
-            self.jobs_table()
-        ))
-        .bind(job_json)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| WgError::Backend(format!("Failed to push job to front: {}", e)))?;
         Ok(())
     }
 }

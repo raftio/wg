@@ -11,21 +11,31 @@ use crate::job::{Job, JobId, JobOptions};
 #[derive(Clone)]
 pub struct Client<B: Backend + Clone = SharedBackend> {
     backend: B,
+    namespace: String,
 }
 
 impl Client<SharedBackend> {
     /// Create a new client with a shared backend.
-    pub fn new(backend: impl Backend + 'static) -> Self {
+    pub fn new(backend: impl Backend + 'static, namespace: impl Into<String>) -> Self {
         Self {
             backend: SharedBackend::new(backend),
+            namespace: namespace.into(),
         }
     }
 }
 
 impl<B: Backend + Clone> Client<B> {
     /// Create a new client with a specific backend.
-    pub fn with_backend(backend: B) -> Self {
-        Self { backend }
+    pub fn with_backend(backend: B, namespace: impl Into<String>) -> Self {
+        Self {
+            backend,
+            namespace: namespace.into(),
+        }
+    }
+
+    /// Get the namespace this client is using.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
     }
 
     /// Enqueue a job for immediate processing with a specific job name.
@@ -65,9 +75,9 @@ impl<B: Backend + Clone> Client<B> {
         let job_id = job.id.clone();
         let json = job.to_json()?;
 
-        self.backend.push_job(&json).await?;
+        self.backend.push_job(&self.namespace, &json).await?;
 
-        tracing::debug!(job_id = %job_id, "Job enqueued");
+        tracing::debug!(job_id = %job_id, namespace = %self.namespace, "Job enqueued");
         Ok(job_id)
     }
 
@@ -118,29 +128,31 @@ impl<B: Backend + Clone> Client<B> {
         })?;
         let json = job.to_json()?;
 
-        self.backend.schedule_job(&json, run_at).await?;
+        self.backend
+            .schedule_job(&self.namespace, &json, run_at)
+            .await?;
 
-        tracing::debug!(job_id = %job_id, run_at = run_at, "Job scheduled");
+        tracing::debug!(job_id = %job_id, run_at = run_at, namespace = %self.namespace, "Job scheduled");
         Ok(job_id)
     }
 
     /// Get the number of jobs in the immediate queue.
     pub async fn queue_len(&self) -> Result<usize> {
-        self.backend.queue_len().await
+        self.backend.queue_len(&self.namespace).await
     }
 
     /// Get the number of jobs in the schedule queue.
     pub async fn schedule_len(&self) -> Result<usize> {
-        self.backend.schedule_len().await
+        self.backend.schedule_len(&self.namespace).await
     }
 
     /// Get the number of jobs in the retry queue.
     pub async fn retry_len(&self) -> Result<usize> {
-        self.backend.retry_len().await
+        self.backend.retry_len(&self.namespace).await
     }
 
     /// Get the number of jobs in the dead letter queue.
     pub async fn dead_len(&self) -> Result<usize> {
-        self.backend.dead_len().await
+        self.backend.dead_len(&self.namespace).await
     }
 }
