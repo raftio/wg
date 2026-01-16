@@ -153,6 +153,10 @@ async fn main() -> wg_core::Result<()> {
 
 See [docs/backend.md](docs/backend.md) for details.
 
+## Benchmarking
+
+See [docs/benchmark.md](docs/benchmark.md) for an end-to-end benchmark harness (Redis/Postgres).
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for details.
