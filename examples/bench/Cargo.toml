@@ -1,0 +1,19 @@
+[package]
+name = "example-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "example-bench"
+path = "main.rs"
+
+[dependencies]
+wg-core = { path = "../../crates/core" }
+wg-redis = { path = "../../crates/redis" }
+wg-postgres = { path = "../../crates/postgres" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

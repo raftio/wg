@@ -118,6 +118,21 @@ where
     /// This will spawn worker tasks, scheduler, retrier, heartbeater, and reaper,
     /// and block until shutdown is requested and draining is complete.
     pub async fn run(&mut self) -> Result<()> {
+        self.run_until(async {
+            tokio::signal::ctrl_c().await.ok();
+        })
+        .await
+    }
+
+    /// Run the worker pool until the provided shutdown future completes.
+    ///
+    /// This will spawn worker tasks, scheduler, retrier, heartbeater, and reaper,
+    /// and block until `shutdown` resolves, then initiate graceful shutdown and
+    /// wait for draining to complete.
+    pub async fn run_until<S>(&mut self, shutdown: S) -> Result<()>
+    where
+        S: Future<Output = ()> + Send,
+    {
         let backend = self
             .backend
             .take()
@@ -217,9 +232,9 @@ where
             "Worker pool started"
         );
 
-        // Wait for shutdown signal
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("Shutdown signal received, draining...");
+        // Wait for shutdown signal/future
+        shutdown.await;
+        tracing::info!("Shutdown requested, draining...");
 
         self.shutdown().await;
 

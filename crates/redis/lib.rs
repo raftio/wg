@@ -135,8 +135,16 @@ impl Backend for RedisBackend {
 
     async fn pop_job(&self, ns: &str, timeout: Duration) -> Result<Option<String>> {
         let mut conn = self.conn.clone();
+        // Redis BRPOP timeout is effectively second-granular; avoid accidental infinite blocks
+        // when callers pass sub-second timeouts (e.g. 100ms -> 0s).
+        let secs = timeout.as_secs();
+        let timeout_secs = if secs == 0 && timeout != Duration::from_secs(0) {
+            1u64
+        } else {
+            secs
+        };
         let result: Option<(String, String)> = conn
-            .brpop(Self::keys(ns).jobs(), timeout.as_secs() as f64)
+            .brpop(Self::keys(ns).jobs(), timeout_secs as f64)
             .await
             .map_err(|e| WgError::Backend(e.to_string()))?;
         Ok(result.map(|(_, json)| json))

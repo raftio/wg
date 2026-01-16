@@ -9,6 +9,7 @@ members = [
     "crates/sqlite",
     "examples/basic",
     "examples/redis",
+    "examples/bench",
 ]
 
 [workspace.package]

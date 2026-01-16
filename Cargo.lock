@@ -303,6 +303,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-bench"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wg-core",
+ "wg-postgres",
+ "wg-redis",
+]
+
+[[package]]
 name = "example-redis"
 version = "0.1.0"
 dependencies = [
