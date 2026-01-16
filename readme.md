@@ -157,6 +157,47 @@ See [docs/backend.md](docs/backend.md) for details.
 
 See [docs/benchmark.md](docs/benchmark.md) for an end-to-end benchmark harness (Redis/Postgres).
 
+### Quick run (Redis)
+
+```bash
+docker run -d -p 6379:6379 --name wg-bench-redis redis
+
+WG_BENCH_BACKEND=redis \
+REDIS_URL=redis://localhost \
+WG_BENCH_JOBS=100000 \
+WG_BENCH_WORKERS=8 \
+WG_BENCH_ENQUEUE_CONCURRENCY=64 \
+cargo run -p example-bench --release --quiet
+
+docker stop wg-bench-redis
+```
+
+### Quick run (Postgres)
+
+```bash
+docker run -d --rm --name wg-bench-pg \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_DB=wgbench \
+  -p 5432:5432 postgres:16
+
+for i in $(seq 1 60); do pg_isready -h localhost -p 5432 -U postgres && break; sleep 1; done
+
+WG_BENCH_BACKEND=postgres \
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/wgbench \
+WG_BENCH_JOBS=100000 \
+WG_BENCH_WORKERS=8 \
+WG_BENCH_ENQUEUE_CONCURRENCY=64 \
+cargo run -p example-bench --release --quiet
+
+docker stop wg-bench-pg
+```
+
+### How to read the output
+
+- `time_to_reach_n_s`: time from starting the worker pool until the Nth job finishes processing (best metric for comparing “jobs/sec” across systems).
+- `time_to_exit_s`: time for the worker pool to fully shut down (includes background loop/cleanup overhead).
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for details.
