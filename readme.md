@@ -55,9 +55,9 @@ struct EmailJob {
 
 #[tokio::main]
 async fn main() -> wg_core::Result<()> {
-    // Create backend
-    let backend = RedisBackend::new("redis://localhost", "myapp").await?;
-    let client = Client::new(backend);
+    // Create backend (namespace is set on the Client)
+    let backend = RedisBackend::new("redis://localhost").await?;
+    let client = Client::new(backend, "myapp");
     
     // Enqueue for immediate processing
     client.enqueue("send_email", EmailJob {
@@ -80,9 +80,10 @@ async fn main() -> wg_core::Result<()> {
 ### Worker (Processing Jobs)
 
 ```rust
-use wg_core::{WorkerPool, JobResult, SharedBackend};
+use wg_core::{WorkerPool, JobResult};
 use wg_redis::RedisBackend;
 use serde::{Serialize, Deserialize};
+use std::time::Duration;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct EmailJob {
@@ -99,13 +100,15 @@ async fn process_email(job: EmailJob) -> JobResult {
 
 #[tokio::main]
 async fn main() -> wg_core::Result<()> {
-    let backend = RedisBackend::new("redis://localhost", "myapp").await?;
+    let backend = RedisBackend::new("redis://localhost").await?;
     
     let mut pool = WorkerPool::builder()
         .backend(backend)
         .namespace("myapp")
         .workers(4)
         .handler(process_email)
+        .fetch_timeout(Duration::from_secs(2))
+        .shutdown_timeout(Duration::from_secs(5))
         .build()?;
     
     pool.run().await?;
@@ -121,13 +124,16 @@ use wg_redis::RedisBackend;
 
 #[tokio::main]
 async fn main() -> wg_core::Result<()> {
-    let backend = RedisBackend::new("redis://localhost", "myapp").await?;
+    let backend = RedisBackend::new("redis://localhost").await?;
     let admin = AdminClient::new(backend);
+    let ns = "myapp";
     
     // Get queue statistics
-    let stats = admin.stats().await?;
-    println!("Queue: {}, Scheduled: {}, Retry: {}, Dead: {}", 
-        stats.queue, stats.scheduled, stats.retry, stats.dead);
+    let stats = admin.stats(ns).await?;
+    println!(
+        "Queue: {}, Scheduled: {}, Retry: {}, Dead: {}",
+        stats.queue_len, stats.schedule_len, stats.retry_len, stats.dead_len
+    );
     
     // List worker pools
     let workers = admin.list_workers().await?;
@@ -136,14 +142,18 @@ async fn main() -> wg_core::Result<()> {
     }
     
     // List and retry dead jobs
-    let dead_jobs = admin.list_dead(10, 0).await?;
+    let dead_jobs = admin.list_dead(ns, 10, 0).await?;
     for job in dead_jobs {
         println!("Dead job {}: {}", job.id, job.last_error.unwrap_or_default());
-        admin.retry_dead(&job.id).await?;
+        admin.retry_dead(ns, &job.id).await?;
     }
     
-    // Unlock stuck in-progress jobs
-    admin.unlock_job("pool-id", &job_json).await?;
+    // Unlock stuck in-progress jobs (you need pool_id + full job_json)
+    let pool_id = "pool-id";
+    let in_progress = admin.get_in_progress_jobs(ns, pool_id).await?;
+    if let Some(job_json) = in_progress.first() {
+        admin.unlock_job(ns, pool_id, job_json).await?;
+    }
     
     Ok(())
 }
@@ -156,47 +166,6 @@ See [docs/backend.md](docs/backend.md) for details.
 ## Benchmarking
 
 See [docs/benchmark.md](docs/benchmark.md) for an end-to-end benchmark harness (Redis/Postgres).
-
-### Quick run (Redis)
-
-```bash
-docker run -d -p 6379:6379 --name wg-bench-redis redis
-
-WG_BENCH_BACKEND=redis \
-REDIS_URL=redis://localhost \
-WG_BENCH_JOBS=100000 \
-WG_BENCH_WORKERS=8 \
-WG_BENCH_ENQUEUE_CONCURRENCY=64 \
-cargo run -p example-bench --release --quiet
-
-docker stop wg-bench-redis
-```
-
-### Quick run (Postgres)
-
-```bash
-docker run -d --rm --name wg-bench-pg \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_DB=wgbench \
-  -p 5432:5432 postgres:16
-
-for i in $(seq 1 60); do pg_isready -h localhost -p 5432 -U postgres && break; sleep 1; done
-
-WG_BENCH_BACKEND=postgres \
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/wgbench \
-WG_BENCH_JOBS=100000 \
-WG_BENCH_WORKERS=8 \
-WG_BENCH_ENQUEUE_CONCURRENCY=64 \
-cargo run -p example-bench --release --quiet
-
-docker stop wg-bench-pg
-```
-
-### How to read the output
-
-- `time_to_reach_n_s`: time from starting the worker pool until the Nth job finishes processing (best metric for comparing “jobs/sec” across systems).
-- `time_to_exit_s`: time for the worker pool to fully shut down (includes background loop/cleanup overhead).
 
 ## Architecture
 
@@ -246,41 +215,6 @@ async fn process_job(job: MyJob) -> JobResult {
 | Distributed | ✓ | ✓ | ✓ | ✗ |
 | ACID | Partial | ✓ | ✓ | ✓ |
 
-## SQL Schema
-
-SQL backends automatically create the following tables:
-
-```sql
--- Jobs queue (immediate processing)
-CREATE TABLE {namespace}_jobs (
-    id BIGSERIAL PRIMARY KEY,
-    job_json TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Scheduled jobs
-CREATE TABLE {namespace}_scheduled (
-    id BIGSERIAL PRIMARY KEY,
-    job_json TEXT NOT NULL,
-    run_at BIGINT NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Retry queue
-CREATE TABLE {namespace}_retry (
-    id BIGSERIAL PRIMARY KEY,
-    job_json TEXT NOT NULL,
-    retry_at BIGINT NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Dead letter queue
-CREATE TABLE {namespace}_dead (
-    id BIGSERIAL PRIMARY KEY,
-    job_json TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-```
 
 ## Examples
 
